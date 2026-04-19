@@ -1,33 +1,62 @@
-FROM node:22.12-alpine AS builder
+# ============================================
+# Stage 1: Dependencies Installation Stage
+# ============================================
+
+ARG NODE_VERSION=24.13.0-slim
+
+FROM node:${NODE_VERSION} AS dependencies
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY package.json package-lock.json* ./
 
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --no-audit --no-fund
+
+# ============================================
+# Stage 2: Build NestJS application
+# ============================================
+
+FROM node:${NODE_VERSION} AS builder
+
+WORKDIR /app
+
+COPY --from=dependencies /app/node_modules ./node_modules
 
 COPY . .
 
+ENV NODE_ENV=production
+
 RUN npm run build
 
-FROM node:22.12-alpine AS runner
+# ============================================
+# Stage 3: Run NestJS application
+# ============================================
+
+FROM node:${NODE_VERSION} AS runner
 
 WORKDIR /app
 
-ENV NODE_ENV=production
-ENV PORT=5001
+ENV NODE_ENV=production \
+    PORT=5001
 
-COPY package*.json ./
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 -G nodejs
 
-RUN npm ci --omit=dev
+COPY package.json package-lock.json* ./
 
-COPY --from=builder /app/dist ./dist
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev --ignore-scripts
+
+COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+
+USER nodejs
 
 EXPOSE 5001
 
 # CLIENT_ORIGIN set via Coolify env var
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-  CMD wget -qO- http://localhost:5001/ || exit 1
+    CMD wget -qO- http://localhost:5001/ || exit 1
 
 CMD ["node", "dist/main.js"]
