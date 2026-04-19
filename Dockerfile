@@ -30,4 +30,4 @@ EXPOSE 5001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD wget -qO- http://localhost:5001/ || exit 1
 
-CMD ["npm", "start:prod"]
+CMD ["npm", "run", "start:prod"]
