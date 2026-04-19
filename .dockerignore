@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+*.log
+*.md
+coverage
+.vscode
+.idea
+.DS_Store
+node_modules
+dist
+test
+*.spec.ts
+*.e2e-spec.ts
+Dockerfile
+.dockerignore
