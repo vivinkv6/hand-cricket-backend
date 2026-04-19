@@ -25,7 +25,7 @@ COPY --from=builder /app/dist ./dist
 
 EXPOSE 5001
 
-ENV CLIENT_ORIGIN=https://hand-cricket.vivinkv.me
+# CLIENT_ORIGIN set via Coolify env var
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD wget -qO- http://localhost:5001/ || exit 1
