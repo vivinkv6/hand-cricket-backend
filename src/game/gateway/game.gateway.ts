@@ -31,6 +31,8 @@ import { isValidRoomId, normalizeRoomId } from '../utils/room-id.util';
     origin: process.env.CLIENT_ORIGIN?.split(',') ?? true,
     credentials: true,
   },
+  pingTimeout: 60000,
+  pingInterval: 25000,
 })
 export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(GameGateway.name);
