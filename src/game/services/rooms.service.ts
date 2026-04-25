@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from 'src/prisma/prisma.service';
 import { ROOM_EXPIRY_MS } from '../constants/room-lifecycle.constants';
 import { GameEngine } from '../engine/game.engine';
 import type { PublicRoomState, RoomState } from '../types/game.types';
@@ -6,16 +7,19 @@ import { isValidRoomId, normalizeRoomId } from '../utils/room-id.util';
 
 @Injectable()
 export class RoomsService {
+  private readonly logger = new Logger(RoomsService.name);
   private readonly rooms = new Map<string, RoomState>();
 
-  constructor(private readonly gameEngine: GameEngine) {}
+  constructor(
+    private readonly gameEngine: GameEngine,
+    private readonly prisma: PrismaService,
+  ) {}
 
   getRoomCount() {
-    this.pruneExpiredRooms();
     return this.rooms.size;
   }
 
-  createRoom(
+  async createRoom(
     mode: RoomState['mode'],
     playerName: string,
     socketId: string,
@@ -32,6 +36,17 @@ export class RoomsService {
 
       if (!this.rooms.has(room.id)) {
         this.rooms.set(room.id, room);
+        
+        // PERSISTENCE: Save to DB
+        await this.prisma.room.create({
+          data: {
+            id: room.id,
+            mode: room.mode,
+            status: room.status,
+            state: room as any,
+          }
+        }).catch(e => this.logger.error(`Failed to persist room: ${e.message}`));
+
         return room;
       }
     }
@@ -39,14 +54,29 @@ export class RoomsService {
     throw new Error('Unable to allocate a unique room ID right now.');
   }
 
-  getRoom(roomId: string) {
-    this.pruneExpiredRooms();
+  async getRoom(roomId: string): Promise<RoomState> {
     if (!isValidRoomId(roomId)) {
       throw new Error('Invalid room ID.');
     }
 
     const normalizedRoomId = normalizeRoomId(roomId);
-    const room = this.rooms.get(normalizedRoomId);
+    
+    // 1. Check memory
+    let room = this.rooms.get(normalizedRoomId);
+    
+    // 2. Fallback to DB (Recovery)
+    if (!room) {
+      const dbRoom = await this.prisma.room.findUnique({
+        where: { id: normalizedRoomId }
+      });
+      
+      if (dbRoom) {
+        room = dbRoom.state as unknown as RoomState;
+        this.rooms.set(normalizedRoomId, room);
+        this.logger.log(`Recovered room session ${normalizedRoomId} from database.`);
+      }
+    }
+
     if (!room) {
       throw new Error('Room not found.');
     }
@@ -54,19 +84,30 @@ export class RoomsService {
     return room;
   }
 
-  getPublicRoom(roomId: string): PublicRoomState {
-    return this.gameEngine.toPublicState(this.getRoom(roomId));
+  async getPublicRoom(roomId: string): Promise<PublicRoomState> {
+    return this.gameEngine.toPublicState(await this.getRoom(roomId));
   }
 
-  save(room: RoomState) {
-    this.pruneExpiredRooms();
+  async save(room: RoomState) {
     this.rooms.set(room.id, room);
+    
+    // PERSISTENCE: Background save to DB
+    void this.prisma.room.update({
+      where: { id: room.id },
+      data: {
+        status: room.status,
+        state: room as any,
+      }
+    }).catch(e => this.logger.error(`Failed to update room: ${e.message}`));
+
     return room;
   }
 
-  delete(roomId: string) {
+  async delete(roomId: string) {
     if (isValidRoomId(roomId)) {
-      this.rooms.delete(normalizeRoomId(roomId));
+      const id = normalizeRoomId(roomId);
+      this.rooms.delete(id);
+      await this.prisma.room.delete({ where: { id } }).catch(() => {});
     }
   }
 
@@ -85,6 +126,7 @@ export class RoomsService {
 
       if (idleFor > ttl) {
         this.rooms.delete(roomId);
+        // We leave the DB record for historical analysis but remove from hot memory
       }
     }
   }

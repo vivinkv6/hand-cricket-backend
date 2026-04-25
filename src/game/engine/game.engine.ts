@@ -381,9 +381,15 @@ export class GameEngine {
     room.currentTurn += 1;
     room.lastActionAt = new Date().toISOString();
 
+    if (innings.currentSpellBalls >= 6 || innings.currentSpellBalls === 0) {
+      innings.overHistory = [];
+      innings.currentSpellBalls = 0;
+    }
+
     batter.deliveriesPlayed += 1;
     bowler.deliveriesBowled += 1;
     innings.currentSpellBalls += 1;
+
 
     const battingTeam = this.getTeam(room, innings.battingTeamId);
     const batterNumber = batter.currentSelection!;
@@ -408,8 +414,10 @@ export class GameEngine {
     if (isOut) {
       battingTeam.wickets += 1;
       bowler.wicketsTaken += 1;
-      label = 'OUT';
+      label = 'Wicket';
     }
+
+
 
     const result: RoundResult = {
       batterId: batter.id,
@@ -432,7 +440,10 @@ export class GameEngine {
       payload: unknown;
     }> = [];
 
+    innings.overHistory.push({ runs, isOut, label });
+
     if (isOut) {
+
       innings.currentBatterId = this.getNextBatterId(
         room,
         innings.battingTeamId,
@@ -450,7 +461,9 @@ export class GameEngine {
       if (innings.number === 1) {
         room.status = 'inningsBreak';
         room.targetScore = battingTeam.score + 1;
+        room.currentTurn = 0; // Reset turn counter for fresh 2nd innings timeline
         room.innings = this.createInnings(
+
           room,
           2,
           innings.bowlingTeamId,
@@ -532,13 +545,16 @@ export class GameEngine {
       currentBowlerId: null,
       currentSpellBalls: 0,
       pendingBowlerSelection: true,
+      overHistory: [],
     };
 
-    if (room.mode === 'solo' || room.mode === 'duel') {
+
+    if (room.mode === 'solo') {
       this.autoAssignBowlerFromTeam(room, innings);
     } else {
       this.autoAssignBotBowler(room, innings);
     }
+
 
     return innings;
   }
@@ -632,17 +648,15 @@ export class GameEngine {
                 ? 'ready'
                 : 'waiting';
 
-    if (room.status === 'live') {
-      if (room.innings?.pendingBowlerSelection) {
-        if (room.mode === 'solo') {
-          this.autoAssignBowlerFromTeam(room, room.innings);
-        } else if (room.mode === 'duel') {
-          this.autoAssignBowlerFromTeam(room, room.innings);
-        } else {
-          this.autoAssignBotBowler(room, room.innings);
-        }
+    if (room.status === 'live' && room.innings?.pendingBowlerSelection) {
+      if (room.mode === 'solo') {
+        this.autoAssignBowlerFromTeam(room, room.innings);
+      } else {
+        this.autoAssignBotBowler(room, room.innings);
       }
     }
+
+
 
     if (
       room.status === 'toss' &&

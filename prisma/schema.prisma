@@ -1,0 +1,124 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "client"
+}
+
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+enum MatchStatus {
+  ONGOING
+  COMPLETED
+}
+
+model Player {
+  id          String        @id @default(uuid())
+  name        String
+  teams       Team[]        @relation("TeamPlayers")
+  stats       PlayerStats[]
+  captained   Team[]        @relation("TeamCaptain")
+  ballsPlayed Ball[]        @relation("Batsman")
+  ballsBowled Ball[]        @relation("Bowler")
+  roomPlayers RoomPlayer[]
+}
+
+model Room {
+  id          String       @id
+  status      String       @default("waiting")
+  mode        String
+  state       Json         // Stores the full PublicRoomState for recovery
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  players     RoomPlayer[]
+}
+
+model RoomPlayer {
+  id        String   @id @default(uuid())
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  roomId    String
+  player    Player   @relation(fields: [playerId], references: [id])
+  playerId  String
+  joinedAt  DateTime @default(now())
+
+  @@unique([roomId, playerId])
+}
+
+
+model Team {
+  id        String   @id @default(uuid())
+  name      String
+  players   Player[] @relation("TeamPlayers")
+  captain   Player   @relation("TeamCaptain", fields: [captainId], references: [id])
+  captainId String
+  matchesA  Match[]  @relation("TeamA")
+  matchesB  Match[]  @relation("TeamB")
+  innings   Innings[]
+}
+
+model Match {
+  id        String      @id @default(uuid())
+  teamA     Team        @relation("TeamA", fields: [teamAId], references: [id])
+  teamAId   String
+  teamB     Team        @relation("TeamB", fields: [teamBId], references: [id])
+  teamBId   String
+  status    MatchStatus @default(ONGOING)
+  winnerId  String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  innings   Innings[]
+  stats     PlayerStats[]
+
+  @@index([createdAt])
+}
+
+model Innings {
+  id            String  @id @default(uuid())
+  match         Match   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  matchId       String
+  number        Int     @default(1)
+  battingTeam   Team    @relation(fields: [battingTeamId], references: [id])
+  battingTeamId String
+  totalRuns     Int     @default(0)
+  wickets       Int     @default(0)
+  overs         Float   @default(0)
+  balls         Ball[]
+}
+
+
+model Ball {
+  id        String  @id @default(uuid())
+  innings   Innings @relation(fields: [inningsId], references: [id], onDelete: Cascade)
+  inningsId String
+  batsman   Player  @relation("Batsman", fields: [batsmanId], references: [id])
+  batsmanId String
+  bowler    Player  @relation("Bowler", fields: [bowlerId], references: [id])
+  bowlerId  String
+  runs      Int
+  isWicket  Boolean @default(false)
+}
+
+model PlayerStats {
+  id        String  @id @default(uuid())
+  player    Player  @relation(fields: [playerId], references: [id])
+  playerId  String
+  match     Match   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  matchId   String
+  runs      Int     @default(0)
+  balls     Int     @default(0)
+  overs     Float   @default(0)
+  runsGiven Int     @default(0)
+  wickets   Int     @default(0)
+
+  @@unique([playerId, matchId])
+  @@index([matchId])
+  @@index([playerId])
+}
+

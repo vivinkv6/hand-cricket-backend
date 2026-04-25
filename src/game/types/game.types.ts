@@ -61,7 +61,9 @@ export interface InningsState {
   currentBowlerId: string | null;
   currentSpellBalls: number;
   pendingBowlerSelection: boolean;
+  overHistory: { runs: number; isOut: boolean; label: string }[];
 }
+
 
 export interface MatchResult {
   winnerTeamId: TeamId | null;
