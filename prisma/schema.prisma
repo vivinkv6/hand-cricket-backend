@@ -1,8 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider   = "prisma-client-js"
   engineType = "client"
@@ -19,27 +17,130 @@ enum MatchStatus {
   COMPLETED
 }
 
+enum GameMode {
+  SOLO
+  DUEL
+  TEAM
+}
+
+enum TossChoice {
+  BAT
+  BOWL
+}
+
 model Player {
-  id          String        @id @default(uuid())
-  name        String
-  teams       Team[]        @relation("TeamPlayers")
-  stats       PlayerStats[]
-  captained   Team[]        @relation("TeamCaptain")
+  id        String        @id @default(uuid())
+  name      String
+  teams     Team[]        @relation("TeamPlayers")
+  stats     PlayerStats[]
+  captained Team[]        @relation("TeamCaptain")
   ballsPlayed Ball[]        @relation("Batsman")
   ballsBowled Ball[]        @relation("Bowler")
   roomPlayers RoomPlayer[]
+
+  @@index([name])
 }
 
+model GameUser {
+  id        String       @id
+  username  String
+  socketId  String?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  players   GamePlayer[]
+
+  @@map("users")
+}
+
+model GameRoom {
+  id         String             @id
+  roomCode   String             @unique
+  status     String
+  mode       String
+  teamSize   Int                @default(1)
+  maxPlayers Int                @default(2)
+  snapshot   Json
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+  players    GamePlayer[]
+  gameState  GameStateRecord?
+  ballEvents BallHistoryEntry[]
+
+  @@index([roomCode])
+  @@map("rooms")
+}
+
+model GamePlayer {
+  id         String   @id
+  userId     String
+  roomId     String
+  role       String?
+  score      Int      @default(0)
+  isOut      Boolean  @default(false)
+  isBot      Boolean  @default(false)
+  teamId     String?
+  connected  Boolean  @default(true)
+  state      Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       GameUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room       GameRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, userId])
+  @@index([roomId])
+  @@map("players")
+}
+
+model GameStateRecord {
+  id          String   @id @default(uuid())
+  roomId       String   @unique
+  currentBall  Int      @default(1)
+  currentOver  Int      @default(1)
+  totalBalls   Int      @default(0)
+  inningsNumber Int     @default(1)
+  strikerId    String?
+  bowlerId     String?
+  lastAction   String?
+  updatedAt    DateTime @updatedAt
+  room         GameRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@map("game_state")
+}
+
+model BallHistoryEntry {
+  id            String   @id @default(uuid())
+  roomId         String
+  inningsNumber  Int
+  ballNumber     Int
+  overNumber     Int
+  ballInOver     Int
+  batterId       String?
+  bowlerId       String?
+  batterChoice   Int
+  bowlerChoice   Int
+  result         String
+  runsScored     Int
+  createdAt      DateTime @default(now())
+  room           GameRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, inningsNumber, ballNumber])
+  @@index([roomId, createdAt])
+  @@map("ball_history")
+}
+
+// Game room with status tracking
 model Room {
   id          String       @id
   status      String       @default("waiting")
-  mode        String
-  state       Json         // Stores the full PublicRoomState for recovery
+  mode        String      // solo, duel, team
+  teamSize    Int         @default(2)
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
-  players     RoomPlayer[]
+  state      Json         // Full room state for recovery
+  players    RoomPlayer[]
 }
 
+// Room player relationship
 model RoomPlayer {
   id        String   @id @default(uuid())
   room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
@@ -48,68 +149,93 @@ model RoomPlayer {
   playerId  String
   joinedAt  DateTime @default(now())
 
+  teamId     String?   // A or B
+  isCaptain  Boolean  @default(false)
+  isBot     Boolean  @default(false)
+
   @@unique([roomId, playerId])
 }
 
-
+// Teams in a match
 model Team {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   name      String
-  players   Player[] @relation("TeamPlayers")
-  captain   Player   @relation("TeamCaptain", fields: [captainId], references: [id])
-  captainId String
+  players   Player[]  @relation("TeamPlayers")
+  captain   Player?  @relation("TeamCaptain", fields: [captainId], references: [id])
+  captainId String?
   matchesA  Match[]  @relation("TeamA")
   matchesB  Match[]  @relation("TeamB")
-  innings   Innings[]
+  innings  Innings[]
 }
 
+// Match record
 model Match {
   id        String      @id @default(uuid())
-  teamA     Team        @relation("TeamA", fields: [teamAId], references: [id])
-  teamAId   String
-  teamB     Team        @relation("TeamB", fields: [teamBId], references: [id])
-  teamBId   String
-  status    MatchStatus @default(ONGOING)
-  winnerId  String?
+  teamA      Team        @relation("TeamA", fields: [teamAId], references: [id])
+  teamAId    String
+  teamB      Team        @relation("TeamB", fields: [teamBId], references: [id])
+  teamBId    String
+  status     MatchStatus @default(ONGOING)
+  winnerId   String?
+  targetScore Int?
   createdAt DateTime    @default(now())
   updatedAt DateTime    @updatedAt
   innings   Innings[]
   stats     PlayerStats[]
 
+  // Toss information
+  tossWinnerTeamId   String?
+  tossWinnerName   String?
+  tossDecision   TossChoice?
+  tossLoserName   String?
+
   @@index([createdAt])
 }
 
+// Innings within a match
 model Innings {
-  id            String  @id @default(uuid())
-  match         Match   @relation(fields: [matchId], references: [id], onDelete: Cascade)
-  matchId       String
-  number        Int     @default(1)
-  battingTeam   Team    @relation(fields: [battingTeamId], references: [id])
-  battingTeamId String
-  totalRuns     Int     @default(0)
-  wickets       Int     @default(0)
-  overs         Float   @default(0)
-  balls         Ball[]
+  id            String   @id @default(uuid())
+  match         Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  matchId      String   @map("match_id")
+  number       Int      @default(1)
+  battingTeam  Team?    @relation(fields: [battingTeamId], references: [id], onDelete: Cascade)
+  battingTeamId String?  @map("batting_team_id")
+  totalRuns    Int      @default(0)
+  wickets     Int      @default(0)
+  overs       Float    @default(0)
+  balls       Ball[]
+
+  // Over tracking
+  currentOverBalls Int @default(0)
 }
 
-
+// Individual ball/delivery
 model Ball {
-  id        String  @id @default(uuid())
-  innings   Innings @relation(fields: [inningsId], references: [id], onDelete: Cascade)
-  inningsId String
-  batsman   Player  @relation("Batsman", fields: [batsmanId], references: [id])
-  batsmanId String
-  bowler    Player  @relation("Bowler", fields: [bowlerId], references: [id])
-  bowlerId  String
-  runs      Int
-  isWicket  Boolean @default(false)
+  id        String   @id @default(uuid())
+  innings   Innings  @relation(fields: [inningsId], references: [id], onDelete: Cascade)
+  inningsId String   @map("innings_id")
+  batsman   Player?  @relation("Batsman", fields: [batsmanId], references: [id], onDelete: Cascade)
+  batsmanId String?  @map("batsman_id")
+  bowler   Player?  @relation("Bowler", fields: [bowlerId], references: [id], onDelete: Cascade)
+  bowlerId String?  @map("bowler_id")
+  runs     Int      @default(0)
+  isWicket Boolean  @default(false)
+  
+  // Ball metadata
+  deliveryNumber Int  @default(0)
+  batsmanNumber Int  @default(0)
+  bowlerNumber Int  @default(0)
+  label       String?
+  
+  @@index([inningsId])
 }
 
+// Player statistics per match
 model PlayerStats {
   id        String  @id @default(uuid())
   player    Player  @relation(fields: [playerId], references: [id])
   playerId  String
-  match     Match   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  match     Match  @relation(fields: [matchId], references: [id], onDelete: Cascade)
   matchId   String
   runs      Int     @default(0)
   balls     Int     @default(0)
@@ -121,4 +247,3 @@ model PlayerStats {
   @@index([matchId])
   @@index([playerId])
 }
-

@@ -24,7 +24,6 @@ import type {
 } from '../dto/game.dto';
 import { GameEngine } from '../engine/game.engine';
 import { RoomsService } from '../services/rooms.service';
-import { MatchesService } from '../services/matches.service';
 import { isValidRoomId, normalizeRoomId } from '../utils/room-id.util';
 
 
@@ -45,7 +44,6 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(
     private readonly roomsService: RoomsService,
     private readonly gameEngine: GameEngine,
-    private readonly matchesService: MatchesService,
   ) {}
 
 
@@ -96,8 +94,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         payload.teamSize,
       );
 
-
-      void client.join(room.id);
+      try {
+        await client.join(room.id);
+      } catch (joinError) {
+        this.logger.warn(`Failed to join socket to room: ${joinError}`);
+      }
       this.broadcastState(room.id);
 
       return {
@@ -105,6 +106,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         roomId: room.id,
         playerId: room.players.find((player) => player.socketId === client.id)
           ?.id,
+        room: this.gameEngine.toPublicState(room),
       };
     });
   }
@@ -123,24 +125,30 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const normalizedRoomId = normalizeRoomId(payload.roomId);
       this.logger.log(`JOIN_ROOM from ${client.id} roomId=${normalizedRoomId}`);
       const room = await this.roomsService.getRoom(normalizedRoomId);
-      await this.roomsService.save(
-        this.gameEngine.joinRoom(
-          room,
-          payload.playerName,
-          client.id,
-          payload.playerId,
-        ),
+      const joinedRoom = this.gameEngine.joinRoom(
+        room,
+        payload.playerName,
+        client.id,
+        payload.playerId,
       );
+      
+      // PERSIST immediately for join
+      await this.roomsService.save(joinedRoom, true);
 
 
-      void client.join(normalizedRoomId);
+      try {
+        await client.join(normalizedRoomId);
+      } catch (joinError) {
+        this.logger.warn(`Failed to join socket to room: ${joinError}`);
+      }
       this.broadcastState(normalizedRoomId);
 
       return {
         ok: true,
         roomId: normalizedRoomId,
-        playerId: room.players.find((player) => player.socketId === client.id)
+        playerId: joinedRoom.players.find((player) => player.socketId === client.id)
           ?.id,
+        room: this.gameEngine.toPublicState(joinedRoom),
       };
     });
   }
@@ -155,23 +163,42 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
         throw new Error('A valid room ID is required to rejoin a room.');
       }
 
-
       const normalizedRoomId = normalizeRoomId(payload.roomId);
       this.logger.log(
-        `REJOIN_ROOM from ${client.id} roomId=${normalizedRoomId} playerId=${payload.playerId}`,
+        `REJOIN_ROOM from ${client.id} roomId=${normalizedRoomId} playerId=${payload.playerId} playerName=${payload.playerName}`,
       );
       const room = await this.roomsService.getRoom(normalizedRoomId);
-      await this.roomsService.save(
-        this.gameEngine.rejoinRoom(room, payload.playerId, client.id),
+      
+      const updatedRoom = this.gameEngine.rejoinRoomByIdentity(
+        room,
+        {
+          playerId: payload.playerId,
+          playerName: payload.playerName,
+        },
+        client.id,
       );
 
-      void client.join(normalizedRoomId);
+      
+      // PERSIST immediately for rejoin
+      await this.roomsService.save(updatedRoom, true);
+
+      const player = updatedRoom.players.find(p => p.socketId === client.id);
+      const resolvedPlayerId = player?.id ?? payload.playerId ?? null;
+
+      await client.join(normalizedRoomId);
       this.server.to(normalizedRoomId).emit(GAME_EVENTS.PLAYER_RECONNECTED, {
         roomId: normalizedRoomId,
-        playerId: payload.playerId,
+        playerId: resolvedPlayerId,
       });
+      
       this.broadcastState(normalizedRoomId);
-      return { ok: true, roomId: normalizedRoomId, playerId: payload.playerId };
+      
+      return { 
+        ok: true, 
+        roomId: normalizedRoomId, 
+        playerId: resolvedPlayerId,
+        room: this.gameEngine.toPublicState(updatedRoom),
+      };
     });
   }
 
@@ -183,20 +210,16 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return this.tryAction(client, async () => {
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
-      await this.roomsService.save(this.gameEngine.startGame(room, payload.playerId));
+      this.verifyPlayerAuth(room, payload.playerId, client.id);
+      await this.roomsService.save(
+        this.gameEngine.startGame(room, payload.playerId),
+        true,
+      );
 
-      
-      // PERSISTENCE: Create match record and start 1st innings
-      await this.matchesService.createMatchRecord(room);
-      if (room.innings) {
-        await this.matchesService.startInnings(room.id, 1, room.innings.battingTeamId);
-      }
-      
       this.broadcastState(roomId);
       return { ok: true };
     });
   }
-
 
   @SubscribeMessage(GAME_EVENTS.SELECT_BOWLER)
   handleSelectBowler(
@@ -207,8 +230,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
+      this.verifyPlayerAuth(room, payload.playerId, client.id);
       await this.roomsService.save(
         this.gameEngine.selectBowler(room, payload.playerId, payload.bowlerId),
+        true, // persist immediately
       );
 
       this.broadcastState(roomId);
@@ -225,9 +250,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
-      await this.roomsService.save(
-        this.gameEngine.selectToss(room, payload.playerId, payload.choice),
-      );
+      this.verifyPlayerAuth(room, payload.playerId, client.id);
+      const updatedRoom = this.gameEngine.selectToss(room, payload.playerId, payload.choice);
+      await this.roomsService.save(updatedRoom, true);
 
       this.broadcastState(roomId);
       return { ok: true };
@@ -242,68 +267,32 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return this.tryAction(client, async () => {
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
+      this.verifyPlayerAuth(room, payload.playerId, client.id);
       const resolution = this.gameEngine.selectNumber(
         room,
         payload.playerId,
         payload.number,
       );
-      await this.roomsService.save(resolution.room);
+      await this.roomsService.save(resolution.room, true, {
+        appendLastRound: Boolean(resolution.room.lastRoundResult),
+      });
 
 
       if (resolution.room.lastRoundResult) {
         this.server
           .to(roomId)
           .emit(GAME_EVENTS.ROUND_RESULT, resolution.room.lastRoundResult);
-        
-        // Save Ball to DB
-        if (room.innings) {
-          const playerNameMap: Record<string, string> = {};
-          room.players.forEach(p => playerNameMap[p.id] = p.name);
-
-          void this.matchesService.saveBall(room.id, room.innings.battingTeamId, {
-            batsmanId: resolution.room.lastRoundResult.batterId,
-            bowlerId: resolution.room.lastRoundResult.bowlerId,
-            runs: resolution.room.lastRoundResult.runs,
-            isWicket: resolution.room.lastRoundResult.isOut,
-            playerNameMap,
-          });
-        }
-
       }
 
       for (const event of resolution.events) {
         if (event.type === 'switchInnings') {
-          // 2-second delay for the final wicket animation to be seen
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
           this.server
             .to(roomId)
             .emit(GAME_EVENTS.SWITCH_INNINGS, event.payload);
-            
-          // PERSISTENCE: Start 2nd innings
-          if (room.innings) {
-             void this.matchesService.startInnings(room.id, 2, room.innings.battingTeamId);
-          }
         }
 
         if (event.type === 'gameOver') {
-          // 2-second delay for the final match-winning ball to be seen
-          await new Promise(resolve => setTimeout(resolve, 2000));
-
-          const result = event.payload as any;
-          this.server.to(roomId).emit(GAME_EVENTS.GAME_OVER, result);
-          
-          // PERSISTENCE: Finalize Match
-          await this.matchesService.finalizeMatch(room.id, result, room.players);
-          
-          // MoM: Only for Team mode with no bots
-          const hasBots = room.players.some(p => p.isBot);
-          if (room.mode === 'team' && !hasBots) {
-            const momData = await this.matchesService.calculateMOM(room.players);
-            if (momData) {
-              this.server.to(roomId).emit('man_of_the_match', momData);
-            }
-          }
+          this.server.to(roomId).emit(GAME_EVENTS.GAME_OVER, event.payload);
         }
       }
 
@@ -323,6 +312,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
+      this.verifyPlayerAuth(room, payload.playerId, client.id);
       await this.roomsService.save(
         this.gameEngine.movePlayer(
           room,
@@ -368,6 +358,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
+      this.verifyPlayerAuth(room, payload.playerId, client.id);
       await this.roomsService.save(
         this.gameEngine.requestRematch(
           room,
@@ -382,11 +373,15 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   private async broadcastState(roomId: string) {
+    const room = await this.roomsService.getRoom(roomId);
+    const validRoom = this.gameEngine.ensureValidState(room);
+    // Update the room in memory with validated state
+    await this.roomsService.save(validRoom);
     this.server
       .to(roomId)
       .emit(
         GAME_EVENTS.GAME_STATE_UPDATE,
-        await this.roomsService.getPublicRoom(roomId),
+        this.gameEngine.toPublicState(validRoom),
       );
   }
 
@@ -399,8 +394,39 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return normalizeRoomId(roomId);
   }
 
+  private readonly rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+  private readonly RATE_LIMIT_WINDOW_MS = 5000;
+  private readonly RATE_LIMIT_MAX = 10;
+
+  private checkRateLimit(clientId: string): void {
+    const now = Date.now();
+    const record = this.rateLimitMap.get(clientId);
+    
+    if (!record || now > record.resetAt) {
+      this.rateLimitMap.set(clientId, { count: 1, resetAt: now + this.RATE_LIMIT_WINDOW_MS });
+      this.cleanupRateLimitMap();
+      return;
+    }
+
+    record.count += 1;
+    if (record.count > this.RATE_LIMIT_MAX) {
+      this.rateLimitMap.delete(clientId);
+      throw new Error('Rate limit exceeded. Please slow down.');
+    }
+  }
+
+  private cleanupRateLimitMap(): void {
+    const now = Date.now();
+    for (const [key, record] of this.rateLimitMap.entries()) {
+      if (now > record.resetAt) {
+        this.rateLimitMap.delete(key);
+      }
+    }
+  }
+
   private async tryAction<T>(client: Socket, action: () => T | Promise<T>) {
     try {
+      this.checkRateLimit(client.id);
       return await action();
     } catch (error) {
       const message =
@@ -408,6 +434,19 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logger.warn(`Socket action failed for ${client.id}: ${message}`);
       client.emit(GAME_EVENTS.ERROR, { message });
       return { ok: false, message } as T;
+    }
+  }
+
+  private verifyPlayerAuth(room: { players: { id: string; socketId: string | null; connected: boolean }[] }, playerId: string, clientId: string): void {
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) {
+      throw new Error('Player not found in this room.');
+    }
+    if (!player.connected) {
+      throw new Error('Player is not connected.');
+    }
+    if (player.socketId !== clientId) {
+      throw new Error('Player authentication failed. Invalid session.');
     }
   }
 

@@ -50,6 +50,15 @@ export class GameEngine {
       ],
       toss: null,
       innings: null,
+      gameState: {
+        inningsNumber: 1,
+        currentBall: 1,
+        currentOver: 1,
+        totalBalls: 0,
+        strikerId: null,
+        bowlerId: null,
+        lastAction: 'room_created',
+      },
       targetScore: null,
       currentTurn: 0,
       lastRoundResult: null,
@@ -117,6 +126,33 @@ export class GameEngine {
     return this.refreshDerivedState(room);
   }
 
+  rejoinRoomByIdentity(
+    room: RoomState,
+    identity: { playerId?: string; playerName?: string },
+    socketId: string,
+  ): RoomState {
+    const player =
+      (identity.playerId
+        ? room.players.find((entry) => entry.id === identity.playerId)
+        : null) ??
+      (identity.playerName
+        ? room.players.find(
+            (entry) =>
+              !entry.isBot &&
+              normalizePlayerName(entry.name).toLowerCase() ===
+                normalizePlayerName(identity.playerName!).toLowerCase(),
+          )
+        : null);
+
+    if (!player) {
+      throw new Error('Unable to find your saved player session in this room.');
+    }
+
+    player.connected = true;
+    player.socketId = socketId;
+    return this.refreshDerivedState(room);
+  }
+
   disconnectPlayer(room: RoomState, socketId: string): RoomState {
     const player = room.players.find((entry) => entry.socketId === socketId);
     if (!player) {
@@ -125,10 +161,6 @@ export class GameEngine {
 
     player.connected = false;
     player.socketId = null;
-
-    if (player.isCaptain) {
-      this.assignCaptain(room, player.teamId);
-    }
 
     return this.refreshDerivedState(room);
   }
@@ -211,6 +243,7 @@ export class GameEngine {
     innings.currentBowlerId = bowler.id;
     innings.currentSpellBalls = 0;
     innings.pendingBowlerSelection = false;
+    innings.overHistory = [];
     bowler.currentSelection = null;
 
     return this.refreshDerivedState(room);
@@ -299,7 +332,7 @@ export class GameEngine {
     if (
       ![innings.currentBatterId, innings.currentBowlerId].includes(player.id)
     ) {
-      throw new Error('It is not this player’s turn.');
+      throw new Error("It is not this player's turn.");
     }
 
     if (player.currentSelection !== null) {
@@ -342,10 +375,17 @@ export class GameEngine {
     room.rematchVotes[playerId] = preference;
 
     const humanPlayers = room.players.filter((player) => !player.isBot);
-    if (humanPlayers.every((player) => room.rematchVotes[player.id])) {
+    const allVoted = humanPlayers.every((player) => room.rematchVotes[player.id]);
+    
+    if (allVoted) {
       if (Object.values(room.rematchVotes).some((vote) => vote === 'swap')) {
         this.swapSides(room);
       }
+
+      // Preserve player connection state and isBot flags before reset
+      const playerConnectionMap = new Map(
+        room.players.map(p => [p.id, { connected: p.connected, isBot: p.isBot, socketId: p.socketId }])
+      );
 
       room.status = this.canStart(room) ? 'ready' : 'waiting';
       room.result = null;
@@ -357,6 +397,16 @@ export class GameEngine {
       room.rematchVotes = {};
       this.resetScores(room);
       TEAM_IDS.forEach((teamId) => this.assignCaptain(room, teamId));
+
+      // Restore player connection state
+      room.players.forEach(p => {
+        const saved = playerConnectionMap.get(p.id);
+        if (saved) {
+          p.connected = saved.connected;
+          p.isBot = saved.isBot;
+          p.socketId = saved.socketId;
+        }
+      });
     }
 
     return this.refreshDerivedState(room);
@@ -381,15 +431,11 @@ export class GameEngine {
     room.currentTurn += 1;
     room.lastActionAt = new Date().toISOString();
 
-    if (innings.currentSpellBalls >= 6 || innings.currentSpellBalls === 0) {
-      innings.overHistory = [];
-      innings.currentSpellBalls = 0;
-    }
-
     batter.deliveriesPlayed += 1;
     bowler.deliveriesBowled += 1;
     innings.currentSpellBalls += 1;
-
+    const ballInOver = ((room.currentTurn - 1) % 6) + 1;
+    const overNumber = Math.floor((room.currentTurn - 1) / 6) + 1;
 
     const battingTeam = this.getTeam(room, innings.battingTeamId);
     const batterNumber = batter.currentSelection!;
@@ -428,6 +474,9 @@ export class GameEngine {
       isOut,
       label,
       deliveryNumber: room.currentTurn,
+      inningsNumber: innings.number,
+      overNumber,
+      ballInOver,
       battingTeamId: battingTeam.id,
     };
 
@@ -440,7 +489,9 @@ export class GameEngine {
       payload: unknown;
     }> = [];
 
-    innings.overHistory.push({ runs, isOut, label });
+    innings.overHistory = [...innings.overHistory, { runs, isOut, label }].slice(
+      -6,
+    );
 
     if (isOut) {
 
@@ -461,14 +512,14 @@ export class GameEngine {
       if (innings.number === 1) {
         room.status = 'inningsBreak';
         room.targetScore = battingTeam.score + 1;
-        room.currentTurn = 0; // Reset turn counter for fresh 2nd innings timeline
+        room.currentTurn = 0;
         room.innings = this.createInnings(
-
           room,
           2,
           innings.bowlingTeamId,
           innings.battingTeamId,
         );
+        room.innings.overHistory = [];
         emittedEvents.push({
           type: 'switchInnings',
           payload: {
@@ -484,7 +535,6 @@ export class GameEngine {
       }
     } else if (innings.currentSpellBalls >= 6) {
       innings.currentBowlerId = null;
-      innings.currentSpellBalls = 0;
       innings.pendingBowlerSelection = true;
     }
 
@@ -555,12 +605,11 @@ export class GameEngine {
       this.autoAssignBotBowler(room, innings);
     }
 
-
     return innings;
   }
 
   private createToss(room: RoomState): TossState {
-    const winnerTeamId: TeamId = Math.random() > 0.5 ? 'A' : 'B';
+    const winnerTeamId: TeamId = this.secureRandom() > 0.5 ? 'A' : 'B';
     const decisionMakerId = this.getTeam(room, winnerTeamId).captainId;
 
     if (!decisionMakerId) {
@@ -575,7 +624,7 @@ export class GameEngine {
 
     const decisionMaker = this.getPlayer(room, decisionMakerId);
     if (decisionMaker.isBot) {
-      toss.choice = Math.random() > 0.5 ? 'bat' : 'bowl';
+      toss.choice = this.secureRandom() > 0.5 ? 'bat' : 'bowl';
     }
 
     return toss;
@@ -621,6 +670,10 @@ export class GameEngine {
       score: 0,
       wickets: 0,
     };
+  };
+
+  ensureValidState(room: RoomState): RoomState {
+    return this.refreshDerivedState(room);
   }
 
   private refreshDerivedState(room: RoomState): RoomState {
@@ -632,8 +685,14 @@ export class GameEngine {
 
       if (!team.captainId || !team.playerIds.includes(team.captainId)) {
         this.assignCaptain(room, teamId);
+      } else {
+        // Double check captain property sync
+        room.players.filter(p => p.teamId === teamId).forEach(p => {
+          p.isCaptain = p.id === team.captainId;
+        });
       }
     });
+
 
     room.status =
       room.status === 'completed'
@@ -648,25 +707,49 @@ export class GameEngine {
                 ? 'ready'
                 : 'waiting';
 
-    if (room.status === 'live' && room.innings?.pendingBowlerSelection) {
-      if (room.mode === 'solo') {
-        this.autoAssignBowlerFromTeam(room, room.innings);
-      } else {
-        this.autoAssignBotBowler(room, room.innings);
+    if (room.status === 'live') {
+      const innings = room.innings;
+      
+      // SAFEGUARD: If no bowler selected at all, always force bowler selection
+      if (innings && !innings.currentBowlerId) {
+        innings.pendingBowlerSelection = true;
+      }
+
+      // SAFEGUARD: At start of over, ensure bowler selection is pending
+      if (innings && !innings.currentBowlerId && !innings.pendingBowlerSelection && innings.currentSpellBalls === 0) {
+        innings.pendingBowlerSelection = true;
+      }
+
+      if (innings?.pendingBowlerSelection) {
+        if (room.mode === 'solo') {
+          this.autoAssignBowlerFromTeam(room, innings);
+        } else {
+          // In Duel or Team mode, only auto-assign if the captain is a bot
+          this.autoAssignBotBowler(room, innings);
+        }
       }
     }
 
+    room.gameState = this.buildGameState(room);
 
-
-    if (
-      room.status === 'toss' &&
-      room.toss?.choice &&
-      room.toss.decisionMakerId
-    ) {
-      return this.selectToss(room, room.toss.decisionMakerId, room.toss.choice);
+    // Auto-resolve toss for bot captains (non-recursive)
+    if (room.status === 'toss' && room.toss?.choice && room.toss.decisionMakerId) {
+      return this.autoResolveToss(room);
     }
 
     room.updatedAt = new Date().toISOString();
+    return room;
+  }
+
+  private autoResolveToss(room: RoomState): RoomState {
+    if (
+      room.status === 'toss' &&
+      room.toss?.choice &&
+      room.toss.decisionMakerId &&
+      room.toss.choice !== null
+    ) {
+      return this.selectToss(room, room.toss.decisionMakerId, room.toss.choice);
+    }
     return room;
   }
 
@@ -687,6 +770,7 @@ export class GameEngine {
     innings.currentBowlerId = bowlerId;
     innings.currentSpellBalls = 0;
     innings.pendingBowlerSelection = false;
+    innings.overHistory = [];
   }
 
   private autoAssignBowlerFromTeam(room: RoomState, innings: InningsState) {
@@ -699,6 +783,7 @@ export class GameEngine {
     innings.currentBowlerId = bowlerId;
     innings.currentSpellBalls = 0;
     innings.pendingBowlerSelection = false;
+    innings.overHistory = [];
   }
 
   private canStart(room: RoomState) {
@@ -792,17 +877,32 @@ export class GameEngine {
       return [];
     }
 
-    if (room.innings.pendingBowlerSelection) {
-      return [this.getTeam(room, room.innings.bowlingTeamId).captainId].filter(
-        Boolean,
-      ) as string[];
+    const innings = room.innings;
+    
+    // If pending bowler selection, return bowling captain
+    if (innings.pendingBowlerSelection) {
+      const bowlingCaptainId = this.getTeam(room, innings.bowlingTeamId).captainId;
+      return bowlingCaptainId ? [bowlingCaptainId] : [];
     }
 
-    return [room.innings.currentBatterId, room.innings.currentBowlerId]
-      .filter(Boolean)
-      .filter(
-        (id) => this.getPlayer(room, id!).currentSelection === null,
-      ) as string[];
+    // Return batter and bowler who haven't selected yet
+    const awaiting: string[] = [];
+    
+    if (innings.currentBatterId) {
+      const batter = room.players.find(p => p.id === innings.currentBatterId);
+      if (batter && batter.currentSelection === null) {
+        awaiting.push(innings.currentBatterId);
+      }
+    }
+    
+    if (innings.currentBowlerId) {
+      const bowler = room.players.find(p => p.id === innings.currentBowlerId);
+      if (bowler && bowler.currentSelection === null) {
+        awaiting.push(innings.currentBowlerId);
+      }
+    }
+    
+    return awaiting;
   }
 
   private getPlayer(room: RoomState, playerId: string) {
@@ -832,10 +932,41 @@ export class GameEngine {
   }
 
   private createRoomId() {
-    return Math.random().toString(36).slice(2, 8).toUpperCase();
+    return crypto.randomUUID().slice(2, 8).toUpperCase();
+  }
+
+  private buildGameState(room: RoomState) {
+    const innings = room.innings;
+    const totalBalls = room.currentTurn;
+    const currentBall =
+      totalBalls === 0
+        ? 1
+        : innings?.pendingBowlerSelection && innings.currentSpellBalls >= 6
+          ? 6
+          : (totalBalls % 6) + 1;
+    const currentOver =
+      totalBalls === 0 ? 1 : Math.floor((Math.max(totalBalls - 1, 0)) / 6) + 1;
+
+    return {
+      inningsNumber: innings?.number ?? 1,
+      currentBall,
+      currentOver,
+      totalBalls,
+      strikerId: innings?.currentBatterId ?? null,
+      bowlerId: innings?.currentBowlerId ?? null,
+      lastAction: room.lastRoundResult
+        ? `${room.lastRoundResult.label} on ball ${room.lastRoundResult.deliveryNumber}`
+        : room.status,
+    };
+  }
+
+  private secureRandom(): number {
+    const array = new Uint32Array(1);
+    crypto.getRandomValues(array);
+    return array[0] / (0xFFFFFFFF + 1);
   }
 
   private rollBotNumber() {
-    return Math.floor(Math.random() * 6) + 1;
+    return Math.floor(this.secureRandom() * 6) + 1;
   }
 }

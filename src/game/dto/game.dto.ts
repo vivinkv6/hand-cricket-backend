@@ -1,48 +1,91 @@
+import { IsString, IsOptional, IsEnum, IsUUID, IsNumber, Min, Max, Length, IsIn } from 'class-validator';
 import type { GameMode, TeamId, TossChoice } from '../types/game.types';
 
-export interface CreateRoomDto {
-  mode: GameMode;
-  playerName: string;
+export class CreateRoomDto {
+  @IsEnum(['solo', 'duel', 'team'])
+  mode!: GameMode;
+
+  @IsString()
+  @Length(1, 24)
+  playerName!: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  @Max(5)
   teamSize?: number;
 }
 
-export interface JoinRoomDto {
-  roomId: string;
-  playerName: string;
+export class JoinRoomDto {
+  @IsString()
+  @Length(4, 8)
+  roomId!: string;
+
+  @IsString()
+  @Length(1, 24)
+  playerName!: string;
+
+  @IsOptional()
+  @IsUUID()
   playerId?: string;
 }
 
-export interface RejoinRoomDto {
-  roomId: string;
-  playerId: string;
+export class RejoinRoomDto {
+  @IsString()
+  @Length(4, 8)
+  roomId!: string;
+
+  @IsOptional()
+  @IsUUID()
+  playerId?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 24)
+  playerName?: string;
 }
 
-export interface RoomPlayerActionDto {
-  roomId: string;
-  playerId: string;
+export class RoomPlayerActionDto {
+  @IsString()
+  @Length(4, 8)
+  roomId!: string;
+
+  @IsUUID()
+  playerId!: string;
 }
 
-export interface SelectNumberDto extends RoomPlayerActionDto {
-  number: number;
+export class SelectNumberDto extends RoomPlayerActionDto {
+  @IsNumber()
+  @Min(1)
+  @Max(6)
+  number!: number;
 }
 
-export interface SelectBowlerDto extends RoomPlayerActionDto {
-  bowlerId: string;
+export class SelectBowlerDto extends RoomPlayerActionDto {
+  @IsUUID()
+  bowlerId!: string;
 }
 
-export interface SwapTeamDto extends RoomPlayerActionDto {
-  targetTeamId: TeamId;
+export class SwapTeamDto extends RoomPlayerActionDto {
+  @IsIn(['A', 'B'])
+  targetTeamId!: TeamId;
 }
 
-export interface RenameTeamDto extends RoomPlayerActionDto {
-  teamId: TeamId;
-  name: string;
+export class RenameTeamDto extends RoomPlayerActionDto {
+  @IsIn(['A', 'B'])
+  teamId!: TeamId;
+
+  @IsString()
+  @Length(1, 24)
+  name!: string;
 }
 
-export interface RematchRequestDto extends RoomPlayerActionDto {
-  preference: 'same' | 'swap';
+export class RematchRequestDto extends RoomPlayerActionDto {
+  @IsIn(['same', 'swap'])
+  preference!: 'same' | 'swap';
 }
 
-export interface SelectTossDto extends RoomPlayerActionDto {
-  choice: TossChoice;
+export class SelectTossDto extends RoomPlayerActionDto {
+  @IsIn(['bat', 'bowl'])
+  choice!: TossChoice;
 }

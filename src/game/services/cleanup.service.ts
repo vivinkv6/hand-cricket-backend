@@ -1,33 +1,37 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
-import { PrismaService } from 'src/prisma/prisma.service';
+import { Cron } from '@nestjs/schedule';
+import { RoomsService } from './rooms.service';
 
 @Injectable()
 export class CleanupService {
   private readonly logger = new Logger(CleanupService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly roomsService: RoomsService) {}
 
-  // Run once per week (Sunday at midnight)
-  @Cron(CronExpression.EVERY_WEEK)
-  async handleWeeklyCleanup() {
-    this.logger.log('Starting weekly data cleanup...');
-    
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+  // Run every day at midnight IST and delete rooms older than 24 hours.
+  @Cron('0 0 * * *', {
+    timeZone: 'Asia/Kolkata',
+  })
+  async handleMidnightCleanup() {
+    this.logger.log('Starting midnight room cleanup for stale rooms...');
+
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
     try {
-      const deletedMatches = await this.prisma.match.deleteMany({
-        where: {
-          createdAt: {
-            lt: sevenDaysAgo,
-          },
-        },
-      });
+      const { deletedCount, roomIds } =
+        await this.roomsService.purgeRoomsOlderThan(cutoff);
 
-      this.logger.log(`Cleanup complete. Deleted ${deletedMatches.count} matches and related records.`);
+      this.logger.log(
+        `Midnight cleanup complete. Deleted ${deletedCount} room(s) older than ${cutoff.toISOString()}.`,
+      );
+
+      if (roomIds.length > 0) {
+        this.logger.debug(`Deleted room IDs: ${roomIds.join(', ')}`);
+      }
     } catch (error) {
-      this.logger.error('Error during weekly cleanup', error.stack);
+      const message =
+        error instanceof Error ? error.stack ?? error.message : String(error);
+      this.logger.error('Error during midnight room cleanup', message);
     }
   }
 }

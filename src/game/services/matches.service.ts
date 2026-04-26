@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { RoomState, MatchResult } from '../types/game.types';
+import { RoomState, MatchResult, TossState, TeamState, PlayerState, InningsState } from '../types/game.types';
 
 @Injectable()
 export class MatchesService {
@@ -13,168 +13,344 @@ export class MatchesService {
   }
 
   private getInningsDbId(matchId: string, teamId: string) {
-    return `${teamId}${matchId}`;
+    return `${teamId}_${matchId}`;
   }
 
-  async ensureMatchPrerequisites(room: RoomState) {
-    try {
-      for (const team of room.teams) {
-        await this.prisma.team.upsert({
-          where: { id: this.getTeamDbId(room.id, team.id) },
-          update: { name: team.name },
-          create: {
-            id: this.getTeamDbId(room.id, team.id),
-            name: team.name,
-            captain: {
-              connectOrCreate: {
-                where: { id: team.captainId || `anon_${team.id}` },
-                create: { 
-                  id: team.captainId || `anon_${team.id}`,
-                  name: room.players.find(p => p.id === team.captainId)?.name || 'Captain'
-                }
-              }
-            }
-          }
-        });
-      }
+  // ============ MATCH MANAGEMENT ============
 
-      await this.prisma.match.upsert({
-        where: { id: room.id },
-        update: { status: 'ONGOING' },
-        create: {
+  async createMatchRecord(room: RoomState) {
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        // Create teams
+        for (const team of room.teams) {
+          // Create or get players
+          for (const player of room.players.filter(p => p.teamId === team.id)) {
+            await tx.player.upsert({
+              where: { id: player.id },
+              update: { name: player.name },
+              create: { id: player.id, name: player.name }
+            });
+          }
+
+          await tx.team.upsert({
+            where: { id: this.getTeamDbId(room.id, team.id) },
+            update: { name: team.name, captainId: team.captainId },
+            create: {
+              id: this.getTeamDbId(room.id, team.id),
+              name: team.name,
+              captainId: team.captainId
+            }
+          });
+        }
+
+        // Create match with toss info if available
+        const matchData: any = {
           id: room.id,
           teamAId: this.getTeamDbId(room.id, 'A'),
           teamBId: this.getTeamDbId(room.id, 'B'),
           status: 'ONGOING',
+        };
+
+        if (room.toss) {
+          const winnerTeam = room.teams.find(t => t.id === room.toss!.winnerTeamId);
+          const loserTeam = room.teams.find(t => t.id !== room.toss!.winnerTeamId);
+          matchData.tossWinnerTeamId = room.toss.winnerTeamId;
+          matchData.tossWinnerName = winnerTeam?.name || 'Team ' + room.toss.winnerTeamId;
+          matchData.tossDecision = room.toss.choice;
+          matchData.tossLoserName = loserTeam?.name || 'Team ' + (room.toss.winnerTeamId === 'A' ? 'B' : 'A');
+        }
+
+        await tx.match.upsert({
+          where: { id: room.id },
+          update: matchData,
+          create: matchData
+        });
+
+        // Create innings if game already started
+        if (room.innings) {
+          await this.startInnings(room.id, room.innings.number, room.innings.battingTeamId);
         }
       });
     } catch (e) {
-      this.logger.error(`Prerequisites check failed: ${e.message}`);
+      this.logger.error(`Failed to create match: ${e.message}`);
     }
   }
 
-  async createMatchRecord(room: RoomState) {
-    await this.ensureMatchPrerequisites(room);
-  }
+  // ============ INNINGS MANAGEMENT ============
 
   async startInnings(matchId: string, inningsNumber: number, battingTeamId: string) {
     try {
-      const id = this.getInningsDbId(matchId, battingTeamId);
-      return await this.prisma.innings.upsert({
-        where: { id },
-        update: { number: inningsNumber },
-        create: {
-          id,
-          matchId,
+      await this.prisma.innings.upsert({
+        where: { id: this.getInningsDbId(matchId, battingTeamId) },
+        update: { 
           number: inningsNumber,
           battingTeamId: this.getTeamDbId(matchId, battingTeamId),
+          totalRuns: 0,
+          wickets: 0,
+          overs: 0,
+          currentOverBalls: 0,
+        },
+        create: {
+          id: this.getInningsDbId(matchId, battingTeamId),
+          matchId: matchId,
+          number: inningsNumber,
+          battingTeamId: this.getTeamDbId(matchId, battingTeamId),
+          totalRuns: 0,
+          wickets: 0,
+          overs: 0,
+          currentOverBalls: 0,
         }
       });
-    } catch (error) {
-      this.logger.error(`Failed to start innings: ${error.message}`);
+    } catch (e) {
+      this.logger.error(`Failed to start innings: ${e.message}`);
     }
   }
 
-  async saveBall(matchId: string, battingTeamId: string, ballData: any) {
+  // ============ BALL/PLAYER STATS ============
+
+  async saveBall(
+    matchId: string, 
+    battingTeamId: string, 
+    ballData: {
+      batsmanId: string;
+      bowlerId: string;
+      runs: number;
+      isWicket: boolean;
+      playerNameMap?: Record<string, string>;
+    },
+    inningsNumber?: number
+  ) {
     try {
       const inningsId = this.getInningsDbId(matchId, battingTeamId);
+      
+      // Ensure players exist
+      await this.prisma.player.upsert({
+        where: { id: ballData.batsmanId },
+        update: {},
+        create: { id: ballData.batsmanId, name: ballData.playerNameMap?.[ballData.batsmanId] || 'Batsman' }
+      });
+      
+      await this.prisma.player.upsert({
+        where: { id: ballData.bowlerId },
+        update: {},
+        create: { id: ballData.bowlerId, name: ballData.playerNameMap?.[ballData.bowlerId] || 'Bowler' }
+      });
 
-      // Verify Innings existence (Critical for FK)
-      const innings = await this.prisma.innings.findUnique({ where: { id: inningsId } });
+      // Get or create innings
+      let innings = await this.prisma.innings.findUnique({ where: { id: inningsId } });
       if (!innings) {
-        this.logger.warn(`Innings ${inningsId} missing during saveBall. Lazy creating...`);
-        await this.startInnings(matchId, 1, battingTeamId); 
+        await this.startInnings(matchId, inningsNumber || 1, battingTeamId);
+        innings = await this.prisma.innings.findUnique({ where: { id: inningsId } });
       }
 
-      // Ensure Players exist
-      for (const pid of [ballData.batsmanId, ballData.bowlerId]) {
-        await this.prisma.player.upsert({
-          where: { id: pid },
-          update: {},
-          create: { id: pid, name: ballData.playerNameMap?.[pid] || 'Player' }
-        });
+      if (!innings) {
+        this.logger.error(`Innings not found: ${inningsId}`);
+        return;
       }
 
-      return await this.prisma.ball.create({
+      // Count balls for delivery number
+      const existingBalls = await this.prisma.ball.count({ where: { inningsId } });
+      const deliveryNumber = existingBalls + 1;
+
+      // Create ball
+      await this.prisma.ball.create({
         data: {
-          id: `ball_${matchId}_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
           inningsId,
           batsmanId: ballData.batsmanId,
           bowlerId: ballData.bowlerId,
           runs: ballData.runs,
           isWicket: ballData.isWicket,
+          deliveryNumber,
+          batsmanNumber: ballData.runs,
+          bowlerNumber: ballData.runs,
         }
       });
-    } catch (error) {
-      this.logger.error(`Failed to save ball: ${error.message}`);
+
+      // Update innings
+      const newRuns = innings.totalRuns + ballData.runs;
+      const newWickets = innings.wickets + (ballData.isWicket ? 1 : 0);
+      const newBalls = innings.currentOverBalls + 1;
+      const newOvers = Math.floor(newBalls / 6) + (newBalls % 6) / 10;
+
+      await this.prisma.innings.update({
+        where: { id: inningsId },
+        data: {
+          totalRuns: newRuns,
+          wickets: newWickets,
+          overs: newOvers,
+          currentOverBalls: newBalls % 6,
+        }
+      });
+
+      // Update player stats
+      await this.updatePlayerStats(matchId, ballData.batsmanId, ballData.runs, ballData.isWicket ? 0 : 1, false);
+      await this.updatePlayerStats(matchId, ballData.bowlerId, 0, 0, true, ballData.runs);
+    } catch (e) {
+      this.logger.error(`Failed to save ball: ${e.message}`);
     }
   }
 
-  async finalizeMatch(matchId: string, result: MatchResult, players: any[]) {
+  private async updatePlayerStats(
+    matchId: string, 
+    playerId: string, 
+    runs: number = 0, 
+    balls: number = 0,
+    isBowler: boolean = false,
+    runsGiven: number = 0
+  ) {
     try {
-      const winnerId = result.winnerTeamId ? this.getTeamDbId(matchId, result.winnerTeamId) : null;
-      
+      const stats = await this.prisma.playerStats.findUnique({
+        where: { playerId_matchId: { playerId, matchId } }
+      });
+
+      if (stats) {
+        await this.prisma.playerStats.update({
+          where: { playerId_matchId: { playerId, matchId } },
+          data: {
+            runs: stats.runs + runs,
+            balls: stats.balls + balls,
+            runsGiven: stats.runsGiven + runsGiven,
+            wickets: isBowler ? stats.wickets + 1 : stats.wickets,
+          }
+        });
+      } else {
+        await this.prisma.playerStats.create({
+          data: {
+            playerId,
+            matchId,
+            runs,
+            balls,
+            runsGiven,
+            wickets: isBowler ? 1 : 0,
+          }
+        });
+      }
+    } catch (e) {
+      this.logger.error(`Failed to update player stats: ${e.message}`);
+    }
+  }
+
+  // ============ MATCH COMPLETION ============
+
+  async finalizeMatch(matchId: string, result: MatchResult, players: PlayerState[]) {
+    try {
       await this.prisma.match.update({
         where: { id: matchId },
         data: {
           status: 'COMPLETED',
-          winnerId: winnerId,
+          winnerId: result.winnerTeamId,
+          targetScore: result.marginType === 'runs' ? result.winningScore : undefined,
         }
       });
 
-      for (const p of players) {
-        await this.prisma.playerStats.upsert({
-          where: { playerId_matchId: { playerId: p.id, matchId: matchId } },
-          update: {
-            runs: p.runsScored,
-            balls: p.deliveriesPlayed,
-            overs: p.deliveriesBowled / 6,
-            runsGiven: p.runsConceded,
-            wickets: p.wicketsTaken,
-          },
-          create: {
-            playerId: p.id,
-            matchId: matchId,
-            runs: p.runsScored,
-            balls: p.deliveriesPlayed,
-            overs: p.deliveriesBowled / 6,
-            runsGiven: p.runsConceded,
-            wickets: p.wicketsTaken,
-          }
+      // Update player stats with final scores
+      for (const player of players) {
+        const stats = await this.prisma.playerStats.findUnique({
+          where: { playerId_matchId: { playerId: player.id, matchId } }
         });
-      }
 
-      return { success: true };
-    } catch (error) {
-      this.logger.error(`Failed to finalize match: ${error.message}`);
+        if (stats) {
+          await this.prisma.playerStats.update({
+            where: { id: stats.id },
+            data: {
+              runs: player.runsScored,
+              balls: player.deliveriesPlayed,
+              overs: player.deliveriesBowled / 6,
+              runsGiven: player.runsConceded,
+              wickets: player.wicketsTaken,
+            }
+          });
+        }
+      }
+    } catch (e) {
+      this.logger.error(`Failed to finalize match: ${e.message}`);
     }
   }
 
-  async calculateMOM(players: any[]) {
+  // ============ QUERY METHODS ============
+
+  async getMatch(matchId: string) {
+    return this.prisma.match.findUnique({
+      where: { id: matchId },
+      include: { teamA: true, teamB: true, innings: true }
+    });
+  }
+
+  async getInningsBalls(matchId: string, battingTeamId: string) {
+    const inningsId = this.getInningsDbId(matchId, battingTeamId);
+    return this.prisma.ball.findMany({
+      where: { inningsId },
+      include: { batsman: true, bowler: true },
+      orderBy: { deliveryNumber: 'asc' }
+    });
+  }
+
+  async getMatchStats(matchId: string) {
+    return this.prisma.playerStats.findMany({
+      where: { matchId },
+      include: { player: true },
+      orderBy: { runs: 'desc' }
+    });
+  }
+
+  async getCurrentInningsNumber(matchId: string): Promise<number> {
     try {
-      if (!players || players.length === 0) return null;
-
-      let momPlayer = players[0];
-      let maxImpact = -1;
-
-      players.forEach(p => {
-        const impact = (p.runsScored * 1) + (p.wicketsTaken * 20);
-        if (impact > maxImpact) {
-          maxImpact = impact;
-          momPlayer = p;
-        }
+      const innings = await this.prisma.innings.findFirst({
+        where: { matchId },
+        orderBy: { number: 'desc' },
+        select: { number: true },
       });
-
-      return {
-        id: momPlayer.id,
-        name: momPlayer.name,
-        runs: momPlayer.runsScored,
-        wickets: momPlayer.wicketsTaken
-      };
-    } catch (error) {
-      this.logger.error(`Failed to calculate MOM: ${error.message}`);
-      return null;
+      return innings?.number ?? 1;
+    } catch {
+      return 1;
     }
+  }
+
+  async getInningsSummary(matchId: string): Promise<{ teamId: string; runs: number; wickets: number; overs: number }[]> {
+    try {
+      const inningsList = await this.prisma.innings.findMany({
+        where: { matchId },
+        include: { battingTeam: true },
+      });
+      return inningsList
+        .filter(i => i.battingTeamId !== null)
+        .map(i => ({
+          teamId: i.battingTeamId!,
+          runs: i.totalRuns,
+          wickets: i.wickets,
+          overs: i.overs,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  // Calculate Man of the Match
+  async calculateMOM(players: any[], matchId: string) {
+    if (!matchId) return null;
+    
+    const stats = await this.prisma.playerStats.findMany({
+      where: { matchId },
+      orderBy: { wickets: 'desc' }
+    });
+
+    if (stats.length === 0) return null;
+
+    // Sort by points (runs + wickets*20)
+    const sorted = stats.sort((a, b) => {
+      const scoreA = (a.runs * 1) + (a.wickets * 20);
+      const scoreB = (b.runs * 1) + (b.wickets * 20);
+      return scoreB - scoreA;
+    });
+
+    const winner = sorted[0];
+    const player = players.find(p => p.id === winner.playerId);
+    
+    return {
+      playerId: winner.playerId,
+      name: player?.name || 'Player',
+      runs: winner.runs,
+      wickets: winner.wickets,
+    };
   }
 }
-

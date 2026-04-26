@@ -50,6 +50,9 @@ export interface RoundResult {
   isOut: boolean;
   label: string;
   deliveryNumber: number;
+  inningsNumber: 1 | 2;
+  overNumber: number;
+  ballInOver: number;
   battingTeamId: TeamId;
 }
 
@@ -64,6 +67,15 @@ export interface InningsState {
   overHistory: { runs: number; isOut: boolean; label: string }[];
 }
 
+export interface GameStateSnapshot {
+  inningsNumber: 1 | 2;
+  currentBall: number;
+  currentOver: number;
+  totalBalls: number;
+  strikerId: string | null;
+  bowlerId: string | null;
+  lastAction: string | null;
+}
 
 export interface MatchResult {
   winnerTeamId: TeamId | null;
@@ -85,6 +97,7 @@ export interface RoomState {
   teams: TeamState[];
   toss: TossState | null;
   innings: InningsState | null;
+  gameState: GameStateSnapshot;
   targetScore: number | null;
   currentTurn: number;
   lastRoundResult: RoundResult | null;
