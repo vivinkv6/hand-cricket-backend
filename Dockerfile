@@ -3,6 +3,7 @@ FROM node:22.12-alpine AS builder
 WORKDIR /app
 
 ARG DATABASE_URL
+ENV DATABASE_URL=$DATABASE_URL
 
 COPY package*.json ./
 
@@ -11,7 +12,7 @@ RUN npm ci
 COPY . .
 
 # Generate Prisma Client during build
-RUN npx prisma generate
+RUN npx prisma generate --schema=./prisma/schema.prisma
 
 RUN npm run build
 
@@ -39,4 +40,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD wget -qO- http://localhost:5001/ || exit 1
 
 # Run migrations and regenerate client before starting the server
-CMD npx prisma migrate deploy && npx prisma generate && node dist/main.js
+CMD npx --yes prisma migrate deploy --schema=./prisma/schema.prisma && npx --yes prisma generate --schema=./prisma/schema.prisma && node dist/main.js
