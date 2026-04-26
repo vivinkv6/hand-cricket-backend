@@ -25,13 +25,19 @@ ENV PORT=5001
 ARG DATABASE_URL
 ENV DATABASE_URL=$DATABASE_URL
 
-COPY package*.json ./
+COPY --from=builder /app/package*.json ./
 
-RUN npm ci --omit=dev
+RUN npm ci --include=dev
 
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
+COPY --from=builder /app/prisma.config.ts ./
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+
+COPY --from=builder /app/dist ./app/dist
+COPY --from=builder /app/prisma ./app/prisma
+COPY --from=builder /app/prisma.config.ts ./app/
+COPY --from=builder /app/node_modules/.prisma ./app/node_modules/.prisma
 
 EXPOSE 5001
 
