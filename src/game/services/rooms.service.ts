@@ -144,12 +144,41 @@ export class RoomsService {
       this.rooms.delete(roomId);
     });
 
-    const result = await this.prisma.gameRoom.deleteMany({
-      where: {
-        id: {
-          in: roomIds,
+    const result = await this.prisma.$transaction(async (tx) => {
+      const affectedUsers = await tx.gamePlayer.findMany({
+        where: {
+          roomId: {
+            in: roomIds,
+          },
         },
-      },
+        select: {
+          userId: true,
+        },
+      });
+
+      const deletedRooms = await tx.gameRoom.deleteMany({
+        where: {
+          id: {
+            in: roomIds,
+          },
+        },
+      });
+
+      const userIds = [...new Set(affectedUsers.map((entry) => entry.userId))];
+      if (userIds.length > 0) {
+        await tx.gameUser.deleteMany({
+          where: {
+            id: {
+              in: userIds,
+            },
+            players: {
+              none: {},
+            },
+          },
+        });
+      }
+
+      return deletedRooms;
     });
 
     return {
