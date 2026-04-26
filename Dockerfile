@@ -27,7 +27,6 @@ ENV DATABASE_URL=$DATABASE_URL
 
 COPY package*.json ./
 
-# Install only production dependencies (now includes prisma CLI)
 RUN npm ci --omit=dev
 
 COPY --from=builder /app/dist ./dist
@@ -39,5 +38,4 @@ EXPOSE 5001
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD wget -qO- http://localhost:5001/ || exit 1
 
-# Run migrations and regenerate client before starting the server
-CMD npx --yes prisma migrate deploy --schema=./prisma/schema.prisma && npx --yes prisma generate --schema=./prisma/schema.prisma && node dist/main.js
+CMD node dist/main.js
