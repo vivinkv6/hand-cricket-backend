@@ -153,10 +153,28 @@ export class GameEngine {
     return this.refreshDerivedState(room);
   }
 
-  disconnectPlayer(room: RoomState, socketId: string): RoomState {
+disconnectPlayer(room: RoomState, socketId: string): RoomState {
     const player = room.players.find((entry) => entry.socketId === socketId);
     if (!player) {
       return room;
+    }
+
+    const playerLeft = player;
+    
+    const shouldRemove = room.mode !== 'solo' && 
+      !['completed'].includes(room.status);
+    
+    if (shouldRemove) {
+      const teamId = player.teamId;
+      room.players = room.players.filter((p) => p.socketId !== socketId);
+      const team = room.teams.find((t) => t.id === teamId);
+      if (team) {
+        team.playerIds = team.playerIds.filter((id) => id !== player.id);
+        if (team.captainId === player.id) {
+          team.captainId = null;
+        }
+      }
+      return this.refreshDerivedState(room);
     }
 
     player.connected = false;
@@ -408,6 +426,31 @@ export class GameEngine {
         }
       });
     }
+
+    return this.refreshDerivedState(room);
+  }
+
+  endGameForDisconnect(room: RoomState, disconnectedPlayerId: string): RoomState {
+    const disconnectedPlayer = room.players.find(p => p.id === disconnectedPlayerId);
+    if (!disconnectedPlayer) {
+      return room;
+    }
+
+    const winnerTeamId = disconnectedPlayer.teamId === 'A' ? 'B' : 'A';
+    const winnerTeam = room.teams.find(t => t.id === winnerTeamId);
+    
+    room.status = 'completed';
+    room.result = {
+      winnerTeamId,
+      loserTeamId: disconnectedPlayer.teamId,
+      reason: 'abandoned',
+      margin: 0,
+      marginType: 'abandoned',
+      winningScore: winnerTeam?.score ?? 0,
+      losingScore: disconnectedPlayer.teamId === 'A' 
+        ? room.teams.find(t => t.id === 'A')?.score ?? 0
+        : room.teams.find(t => t.id === 'B')?.score ?? 0,
+    };
 
     return this.refreshDerivedState(room);
   }

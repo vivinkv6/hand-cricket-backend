@@ -80,9 +80,9 @@ export interface GameStateSnapshot {
 export interface MatchResult {
   winnerTeamId: TeamId | null;
   loserTeamId: TeamId | null;
-  reason: 'allOut' | 'chaseComplete' | 'tie';
+  reason: 'allOut' | 'chaseComplete' | 'tie' | 'abandoned';
   margin: number;
-  marginType: 'runs' | 'wickets' | 'tie';
+  marginType: 'runs' | 'wickets' | 'tie' | 'abandoned';
   winningScore: number;
   losingScore: number;
 }

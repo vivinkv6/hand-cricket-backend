@@ -61,15 +61,40 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     for (const roomId of rooms) {
       try {
         const room = await this.roomsService.getRoom(roomId);
+        const disconnectedPlayer = room.players.find(p => p.socketId === client.id);
+        
         await this.roomsService.save(
           this.gameEngine.disconnectPlayer(room, client.id),
         );
+        
         this.server.to(roomId).emit(GAME_EVENTS.PLAYER_DISCONNECTED, {
           roomId,
           playerSocketId: client.id,
+          playerName: disconnectedPlayer?.name,
         });
         
         await this.broadcastState(roomId);
+        
+        if (disconnectedPlayer && room.mode !== 'solo' && !['waiting', 'ready', 'completed'].includes(room.status)) {
+          const otherPlayer = room.players.find(p => p.socketId !== client.id && !p.isBot);
+          if (!otherPlayer) {
+            const updatedRoom = await this.roomsService.getRoom(roomId);
+            await this.roomsService.save(
+              this.gameEngine.endGameForDisconnect(updatedRoom, disconnectedPlayer.id),
+            );
+            this.server.to(roomId).emit(GAME_EVENTS.GAME_OVER, {
+              reason: 'playerLeft',
+              winnerTeamId: updatedRoom.teams.find(t => t.id !== disconnectedPlayer.teamId)?.id ?? null,
+              margin: 0,
+              marginType: 'abandoned',
+              winningScore: 0,
+              losingScore: 0,
+            });
+            this.server.to(roomId).emit(GAME_EVENTS.GAME_STATE_UPDATE, 
+              this.gameEngine.toPublicState(await this.roomsService.getRoom(roomId))
+            );
+          }
+        }
       } catch {
         continue;
       }
