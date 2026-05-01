@@ -577,8 +577,11 @@ disconnectPlayer(room: RoomState, socketId: string): RoomState {
         emittedEvents.push({ type: 'gameOver', payload: room.result });
       }
     } else if (innings.currentSpellBalls >= 6) {
-      innings.currentBowlerId = null;
-      innings.pendingBowlerSelection = true;
+      innings.overHistory = [];
+      if (room.mode === 'team') {
+        innings.currentBowlerId = null;
+        innings.pendingBowlerSelection = true;
+      }
     }
 
     return {
@@ -644,6 +647,11 @@ disconnectPlayer(room: RoomState, socketId: string): RoomState {
 
     if (room.mode === 'solo') {
       this.autoAssignBowlerFromTeam(room, innings);
+    } else if (room.mode === 'duel') {
+      // In duel mode, same bowler continues bowling each over
+      const bowlingTeam = this.getTeam(room, bowlingTeamId);
+      innings.currentBowlerId = bowlingTeam.playerIds[0] ?? null;
+      innings.pendingBowlerSelection = false;
     } else {
       this.autoAssignBotBowler(room, innings);
     }
@@ -766,8 +774,14 @@ disconnectPlayer(room: RoomState, socketId: string): RoomState {
       if (innings?.pendingBowlerSelection) {
         if (room.mode === 'solo') {
           this.autoAssignBowlerFromTeam(room, innings);
+        } else if (room.mode === 'duel') {
+          // In duel mode, same bowler continues - set bowler and clear flag
+          if (!innings.currentBowlerId) {
+            innings.currentBowlerId = this.getTeam(room, innings.bowlingTeamId).playerIds[0] ?? null;
+          }
+          innings.pendingBowlerSelection = false;
         } else {
-          // In Duel or Team mode, only auto-assign if the captain is a bot
+          // In Team mode, only auto-assign if the captain is a bot
           this.autoAssignBotBowler(room, innings);
         }
       }
