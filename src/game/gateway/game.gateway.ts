@@ -24,6 +24,7 @@ import type {
 } from '../dto/game.dto';
 import { GameEngine } from '../engine/game.engine';
 import { RoomsService } from '../services/rooms.service';
+import { GameActionGuard } from '../services/game-action.guard';
 import { isValidRoomId, normalizeRoomId } from '../utils/room-id.util';
 
 
@@ -44,6 +45,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(
     private readonly roomsService: RoomsService,
     private readonly gameEngine: GameEngine,
+    private readonly gameActionGuard: GameActionGuard,
   ) {}
 
 
@@ -62,9 +64,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       try {
         const room = await this.roomsService.getRoom(roomId);
         const disconnectedPlayer = room.players.find(p => p.socketId === client.id);
-        
         await this.roomsService.save(
           this.gameEngine.disconnectPlayer(room, client.id),
+          true,
         );
         
         this.server.to(roomId).emit(GAME_EVENTS.PLAYER_DISCONNECTED, {
@@ -72,29 +74,7 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
           playerSocketId: client.id,
           playerName: disconnectedPlayer?.name,
         });
-        
         await this.broadcastState(roomId);
-        
-        if (disconnectedPlayer && room.mode !== 'solo' && !['waiting', 'ready', 'completed'].includes(room.status)) {
-          const otherPlayer = room.players.find(p => p.socketId !== client.id && !p.isBot);
-          if (!otherPlayer) {
-            const updatedRoom = await this.roomsService.getRoom(roomId);
-            await this.roomsService.save(
-              this.gameEngine.endGameForDisconnect(updatedRoom, disconnectedPlayer.id),
-            );
-            this.server.to(roomId).emit(GAME_EVENTS.GAME_OVER, {
-              reason: 'playerLeft',
-              winnerTeamId: updatedRoom.teams.find(t => t.id !== disconnectedPlayer.teamId)?.id ?? null,
-              margin: 0,
-              marginType: 'abandoned',
-              winningScore: 0,
-              losingScore: 0,
-            });
-            this.server.to(roomId).emit(GAME_EVENTS.GAME_STATE_UPDATE, 
-              this.gameEngine.toPublicState(await this.roomsService.getRoom(roomId))
-            );
-          }
-        }
       } catch {
         continue;
       }
@@ -235,7 +215,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return this.tryAction(client, async () => {
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
-      this.verifyPlayerAuth(room, payload.playerId, client.id);
+      await this.validateGameAction(client, GAME_EVENTS.START_GAME, payload, room, {
+        cooldownMs: 750,
+      });
       await this.roomsService.save(
         this.gameEngine.startGame(room, payload.playerId),
         true,
@@ -255,7 +237,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
-      this.verifyPlayerAuth(room, payload.playerId, client.id);
+      await this.validateGameAction(client, GAME_EVENTS.SELECT_BOWLER, payload, room, {
+        cooldownMs: 750,
+        requireLiveMatch: true,
+      });
       await this.roomsService.save(
         this.gameEngine.selectBowler(room, payload.playerId, payload.bowlerId),
         true, // persist immediately
@@ -275,7 +260,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
-      this.verifyPlayerAuth(room, payload.playerId, client.id);
+      await this.validateGameAction(client, GAME_EVENTS.SELECT_TOSS, payload, room, {
+        cooldownMs: 750,
+        requireLiveMatch: true,
+      });
       const updatedRoom = this.gameEngine.selectToss(room, payload.playerId, payload.choice);
       await this.roomsService.save(updatedRoom, true);
 
@@ -292,7 +280,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return this.tryAction(client, async () => {
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
-      this.verifyPlayerAuth(room, payload.playerId, client.id);
+      await this.validateGameAction(client, GAME_EVENTS.SELECT_NUMBER, payload, room, {
+        cooldownMs: 500,
+        requireLiveMatch: true,
+      });
       const resolution = this.gameEngine.selectNumber(
         room,
         payload.playerId,
@@ -337,7 +328,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
-      this.verifyPlayerAuth(room, payload.playerId, client.id);
+      await this.validateGameAction(client, GAME_EVENTS.TEAM_SWAP, payload, room, {
+        cooldownMs: 750,
+      });
       await this.roomsService.save(
         this.gameEngine.movePlayer(
           room,
@@ -360,6 +353,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
+      await this.validateGameAction(client, GAME_EVENTS.RENAME_TEAM, payload, room, {
+        cooldownMs: 750,
+      });
       await this.roomsService.save(
         this.gameEngine.renameTeam(
           room,
@@ -383,7 +379,9 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const roomId = this.requireRoomId(payload.roomId);
       const room = await this.roomsService.getRoom(roomId);
-      this.verifyPlayerAuth(room, payload.playerId, client.id);
+      await this.validateGameAction(client, GAME_EVENTS.REMATCH_REQUEST, payload, room, {
+        cooldownMs: 1000,
+      });
       await this.roomsService.save(
         this.gameEngine.requestRematch(
           room,
@@ -419,39 +417,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return normalizeRoomId(roomId);
   }
 
-  private readonly rateLimitMap = new Map<string, { count: number; resetAt: number }>();
-  private readonly RATE_LIMIT_WINDOW_MS = 5000;
-  private readonly RATE_LIMIT_MAX = 10;
-
-  private checkRateLimit(clientId: string): void {
-    const now = Date.now();
-    const record = this.rateLimitMap.get(clientId);
-    
-    if (!record || now > record.resetAt) {
-      this.rateLimitMap.set(clientId, { count: 1, resetAt: now + this.RATE_LIMIT_WINDOW_MS });
-      this.cleanupRateLimitMap();
-      return;
-    }
-
-    record.count += 1;
-    if (record.count > this.RATE_LIMIT_MAX) {
-      this.rateLimitMap.delete(clientId);
-      throw new Error('Rate limit exceeded. Please slow down.');
-    }
-  }
-
-  private cleanupRateLimitMap(): void {
-    const now = Date.now();
-    for (const [key, record] of this.rateLimitMap.entries()) {
-      if (now > record.resetAt) {
-        this.rateLimitMap.delete(key);
-      }
-    }
-  }
-
   private async tryAction<T>(client: Socket, action: () => T | Promise<T>) {
     try {
-      this.checkRateLimit(client.id);
       return await action();
     } catch (error) {
       const message =
@@ -462,17 +429,25 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  private verifyPlayerAuth(room: { players: { id: string; socketId: string | null; connected: boolean }[] }, playerId: string, clientId: string): void {
-    const player = room.players.find(p => p.id === playerId);
-    if (!player) {
-      throw new Error('Player not found in this room.');
-    }
-    if (!player.connected) {
-      throw new Error('Player is not connected.');
-    }
-    if (player.socketId !== clientId) {
-      throw new Error('Player authentication failed. Invalid session.');
-    }
+  private async validateGameAction(
+    client: Socket,
+    eventName: string,
+    payload: RoomPlayerActionDto,
+    room: Awaited<ReturnType<RoomsService['getRoom']>>,
+    options: {
+      cooldownMs: number;
+      requireLiveMatch?: boolean;
+    },
+  ) {
+    await this.gameActionGuard.validateOrThrow({
+      room,
+      roomId: room.id,
+      playerId: payload.playerId,
+      actionId: payload.actionId,
+      client,
+      eventName,
+      cooldownMs: options.cooldownMs,
+      requireLiveMatch: options.requireLiveMatch,
+    });
   }
-
 }

@@ -61,6 +61,7 @@ export class GameEngine {
       },
       targetScore: null,
       currentTurn: 0,
+      ballHistory: [],
       lastRoundResult: null,
       rematchVotes: {},
       result: null,
@@ -153,28 +154,10 @@ export class GameEngine {
     return this.refreshDerivedState(room);
   }
 
-disconnectPlayer(room: RoomState, socketId: string): RoomState {
+  disconnectPlayer(room: RoomState, socketId: string): RoomState {
     const player = room.players.find((entry) => entry.socketId === socketId);
     if (!player) {
       return room;
-    }
-
-    const playerLeft = player;
-    
-    const shouldRemove = room.mode !== 'solo' && 
-      !['completed'].includes(room.status);
-    
-    if (shouldRemove) {
-      const teamId = player.teamId;
-      room.players = room.players.filter((p) => p.socketId !== socketId);
-      const team = room.teams.find((t) => t.id === teamId);
-      if (team) {
-        team.playerIds = team.playerIds.filter((id) => id !== player.id);
-        if (team.captainId === player.id) {
-          team.captainId = null;
-        }
-      }
-      return this.refreshDerivedState(room);
     }
 
     player.connected = false;
@@ -211,6 +194,7 @@ disconnectPlayer(room: RoomState, socketId: string): RoomState {
     room.targetScore = null;
     room.result = null;
     room.currentTurn = 0;
+    room.ballHistory = [];
     room.lastRoundResult = null;
     room.rematchVotes = {};
     room.innings = null;
@@ -411,6 +395,7 @@ disconnectPlayer(room: RoomState, socketId: string): RoomState {
       room.toss = null;
       room.innings = null;
       room.currentTurn = 0;
+      room.ballHistory = [];
       room.lastRoundResult = null;
       room.rematchVotes = {};
       this.resetScores(room);
@@ -523,6 +508,7 @@ disconnectPlayer(room: RoomState, socketId: string): RoomState {
       battingTeamId: battingTeam.id,
     };
 
+    room.ballHistory = [...room.ballHistory, result];
     room.lastRoundResult = result;
     batter.currentSelection = null;
     bowler.currentSelection = null;
@@ -728,6 +714,8 @@ disconnectPlayer(room: RoomState, socketId: string): RoomState {
   }
 
   private refreshDerivedState(room: RoomState): RoomState {
+    room.ballHistory = room.ballHistory ?? [];
+
     TEAM_IDS.forEach((teamId) => {
       const team = this.getTeam(room, teamId);
       team.playerIds = room.players
@@ -795,6 +783,7 @@ disconnectPlayer(room: RoomState, socketId: string): RoomState {
     }
 
     room.updatedAt = new Date().toISOString();
+    room.lastActionAt = room.lastActionAt ?? room.updatedAt;
     return room;
   }
 

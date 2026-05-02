@@ -52,6 +52,9 @@ export class RoomPlayerActionDto {
 
   @IsUUID()
   playerId!: string;
+
+  @IsUUID()
+  actionId!: string;
 }
 
 export class SelectNumberDto extends RoomPlayerActionDto {

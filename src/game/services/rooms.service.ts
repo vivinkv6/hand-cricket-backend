@@ -9,6 +9,7 @@ import type {
   TeamId,
 } from '../types/game.types';
 import { isValidRoomId, normalizeRoomId } from '../utils/room-id.util';
+import { RoomCacheService } from './room-cache.service';
 
 @Injectable()
 export class RoomsService {
@@ -18,6 +19,7 @@ export class RoomsService {
   constructor(
     private readonly gameEngine: GameEngine,
     private readonly prisma: PrismaService,
+    private readonly roomCache: RoomCacheService,
   ) {}
 
   getRoomCount() {
@@ -62,6 +64,13 @@ export class RoomsService {
       if (cachedRoom) {
         return this.gameEngine.ensureValidState(cachedRoom);
       }
+
+      const redisRoom = await this.roomCache.getRoom(normalizedRoomId);
+      if (redisRoom && this.isValidRoomState(redisRoom)) {
+        const validRedisRoom = this.gameEngine.ensureValidState(redisRoom);
+        this.rooms.set(normalizedRoomId, validRedisRoom);
+        return validRedisRoom;
+      }
     }
 
     const dbRoom = await this.prisma.gameRoom.findUnique({
@@ -79,6 +88,7 @@ export class RoomsService {
 
     const validState = this.gameEngine.ensureValidState(recoveredState);
     this.rooms.set(normalizedRoomId, validState);
+    await this.roomCache.setRoom(validState);
     return validState;
   }
 
@@ -93,6 +103,7 @@ export class RoomsService {
   ) {
     const validRoom = this.gameEngine.ensureValidState(room);
     this.rooms.set(validRoom.id, validRoom);
+    await this.roomCache.setRoom(validRoom);
 
     const savePromise = this.persistRoom(
       validRoom,
@@ -117,6 +128,7 @@ export class RoomsService {
 
     const id = normalizeRoomId(roomId);
     this.rooms.delete(id);
+    await this.roomCache.deleteRoom(id);
     await this.prisma.gameRoom.delete({ where: { id } }).catch(() => undefined);
   }
 

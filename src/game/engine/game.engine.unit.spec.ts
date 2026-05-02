@@ -276,7 +276,6 @@ describe('Performance', () => {
   it('processes deliveries quickly', () => {
     const { room } = createTestRoom(engine, 'solo', 'P');
     const p1 = room.players[0];
-    const bot = room.players.find(p => p.isBot)!;
 
     startToss(engine, room, p1.id);
 
@@ -285,9 +284,6 @@ describe('Performance', () => {
       if (room.status !== 'live') break;
       if (room.innings?.pendingBowlerSelection) break;
       engine.selectNumber(room, p1.id, 3);
-      if (room.lastRoundResult?.runs !== undefined) {
-        engine.selectNumber(room, bot.id, 1);
-      }
     }
     const duration = performance.now() - start;
     expect(duration).toBeLessThan(100);

@@ -100,6 +100,7 @@ export interface RoomState {
   gameState: GameStateSnapshot;
   targetScore: number | null;
   currentTurn: number;
+  ballHistory: RoundResult[];
   lastRoundResult: RoundResult | null;
   rematchVotes: Record<string, 'same' | 'swap'>;
   result: MatchResult | null;
