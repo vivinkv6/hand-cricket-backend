@@ -444,6 +444,7 @@ export class GameEngine {
     return {
       ...room,
       awaitingPlayerIds: this.getAwaitingPlayerIds(room),
+      spectatorCount: 0,
     };
   }
 

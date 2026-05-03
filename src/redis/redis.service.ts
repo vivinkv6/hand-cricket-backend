@@ -19,7 +19,13 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     string,
     { value: string; expiresAt: number | null }
   >();
+  private readonly fallbackSets = new Map<string, Set<string>>();
+  private readonly patternSubscribers = new Map<
+    string,
+    Set<(channel: string, payload: string) => void | Promise<void>>
+  >();
   private readonly client: Redis | null;
+  private subscriber: Redis | null = null;
 
   constructor() {
     const redisUrl = process.env.REDIS_URL;
@@ -37,9 +43,23 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       enableOfflineQueue: false,
       maxRetriesPerRequest: 1,
     });
+    this.subscriber = this.client.duplicate();
 
     this.client.on('error', (error) => {
       this.logger.warn(`Redis error: ${error.message}`);
+    });
+    this.subscriber.on('error', (error) => {
+      this.logger.warn(`Redis subscriber error: ${error.message}`);
+    });
+    this.subscriber.on('pmessage', (pattern, channel, payload) => {
+      const listeners = this.patternSubscribers.get(pattern);
+      if (!listeners) {
+        return;
+      }
+
+      for (const listener of listeners) {
+        void listener(channel, payload);
+      }
     });
   }
 
@@ -50,6 +70,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.client.connect();
+      if (this.subscriber) {
+        await this.subscriber.connect();
+        if (this.patternSubscribers.size > 0) {
+          await this.subscriber.psubscribe(...this.patternSubscribers.keys());
+        }
+      }
       this.logger.log('Redis connected successfully.');
     } catch (error) {
       const message =
@@ -59,6 +85,10 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    if (this.subscriber && this.subscriber.status !== 'end') {
+      await this.subscriber.quit().catch(() => undefined);
+    }
+
     if (this.client && this.client.status !== 'end') {
       await this.client.quit().catch(() => undefined);
     }
@@ -123,6 +153,72 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     this.fallbackStore.delete(key);
   }
 
+  async publish(channel: string, payload: string): Promise<void> {
+    if (this.isRedisReady()) {
+      await this.client!.publish(channel, payload).catch(() => undefined);
+      return;
+    }
+
+    for (const [pattern, listeners] of this.patternSubscribers.entries()) {
+      if (!this.matchesPattern(channel, pattern)) {
+        continue;
+      }
+
+      for (const listener of listeners) {
+        await listener(channel, payload);
+      }
+    }
+  }
+
+  async subscribePattern(
+    pattern: string,
+    listener: (channel: string, payload: string) => void | Promise<void>,
+  ): Promise<void> {
+    const listeners = this.patternSubscribers.get(pattern) ?? new Set();
+    listeners.add(listener);
+    this.patternSubscribers.set(pattern, listeners);
+
+    if (this.subscriber?.status === 'ready') {
+      await this.subscriber.psubscribe(pattern).catch(() => undefined);
+    }
+  }
+
+  async addToSet(key: string, member: string): Promise<void> {
+    if (this.isRedisReady()) {
+      await this.client!.sadd(key, member).catch(() => undefined);
+      return;
+    }
+
+    const set = this.fallbackSets.get(key) ?? new Set<string>();
+    set.add(member);
+    this.fallbackSets.set(key, set);
+  }
+
+  async removeFromSet(key: string, member: string): Promise<void> {
+    if (this.isRedisReady()) {
+      await this.client!.srem(key, member).catch(() => undefined);
+      return;
+    }
+
+    const set = this.fallbackSets.get(key);
+    if (!set) {
+      return;
+    }
+
+    set.delete(member);
+    if (set.size === 0) {
+      this.fallbackSets.delete(key);
+    }
+  }
+
+  async countSetMembers(key: string): Promise<number> {
+    if (this.isRedisReady()) {
+      return this.client!.scard(key).catch(() => 0);
+    }
+
+    return this.fallbackSets.get(key)?.size ?? 0;
+  }
+
   private isRedisReady() {
     return Boolean(this.client && this.client.status === 'ready');
   }
@@ -165,5 +261,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   private stringifyError(error: unknown) {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private matchesPattern(channel: string, pattern: string) {
+    const regex = new RegExp(
+      `^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`,
+    );
+    return regex.test(channel);
   }
 }

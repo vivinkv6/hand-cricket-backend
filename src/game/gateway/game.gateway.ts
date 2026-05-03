@@ -3,6 +3,7 @@ import {
   MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
@@ -13,6 +14,7 @@ import { GAME_EVENTS } from '../contracts/game-events';
 import type {
   CreateRoomDto,
   JoinRoomDto,
+  LeaveRoomDto,
   RejoinRoomDto,
   RematchRequestDto,
   RenameTeamDto,
@@ -26,7 +28,13 @@ import { GameEngine } from '../engine/game.engine';
 import { RoomsService } from '../services/rooms.service';
 import { GameActionGuard } from '../services/game-action.guard';
 import { isValidRoomId, normalizeRoomId } from '../utils/room-id.util';
+import { RoomBroadcastService } from '../services/room-broadcast.service';
 
+type SocketSession = {
+  roomId?: string;
+  role?: 'player' | 'spectator';
+  playerId?: string | null;
+};
 
 @WebSocketGateway({
   cors: {
@@ -36,7 +44,9 @@ import { isValidRoomId, normalizeRoomId } from '../utils/room-id.util';
   pingTimeout: 60000,
   pingInterval: 25000,
 })
-export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class GameGateway
+  implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit
+{
   private readonly logger = new Logger(GameGateway.name);
 
   @WebSocketServer()
@@ -46,8 +56,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly roomsService: RoomsService,
     private readonly gameEngine: GameEngine,
     private readonly gameActionGuard: GameActionGuard,
+    private readonly roomBroadcastService: RoomBroadcastService,
   ) {}
 
+  afterInit() {
+    this.roomBroadcastService.registerListener(async ({ roomId, event, payload }) => {
+      this.server.to(roomId).emit(event, payload);
+    });
+  }
 
   handleConnection(client: Socket) {
     this.logger.log(`Socket connected: ${client.id}`);
@@ -56,6 +72,13 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleDisconnect(client: Socket) {
     this.logger.log(`Socket disconnected: ${client.id}`);
+    const session = client.data as SocketSession;
+    if (session.role === 'spectator' && session.roomId) {
+      await this.roomsService.removeSpectator(session.roomId, client.id);
+      await this.broadcastState(session.roomId);
+      return;
+    }
+
     const rooms = Array.from(client.rooms.values()).filter(
       (room) => room !== client.id,
     );
@@ -68,8 +91,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
           this.gameEngine.disconnectPlayer(room, client.id),
           true,
         );
-        
-        this.server.to(roomId).emit(GAME_EVENTS.PLAYER_DISCONNECTED, {
+
+        await this.publishRoomEvent(roomId, GAME_EVENTS.PLAYER_DISCONNECTED, {
           roomId,
           playerSocketId: client.id,
           playerName: disconnectedPlayer?.name,
@@ -104,6 +127,11 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       } catch (joinError) {
         this.logger.warn(`Failed to join socket to room: ${joinError}`);
       }
+      client.data = {
+        roomId: room.id,
+        role: 'player',
+        playerId: room.players.find((player) => player.socketId === client.id)?.id ?? null,
+      } satisfies SocketSession;
       this.broadcastState(room.id);
 
       return {
@@ -130,6 +158,25 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const normalizedRoomId = normalizeRoomId(payload.roomId);
       this.logger.log(`JOIN_ROOM from ${client.id} roomId=${normalizedRoomId}`);
       const room = await this.roomsService.getRoom(normalizedRoomId);
+
+      if (payload.role === 'spectator') {
+        await client.join(normalizedRoomId);
+        await this.roomsService.addSpectator(normalizedRoomId, client.id);
+        client.data = {
+          roomId: normalizedRoomId,
+          role: 'spectator',
+          playerId: null,
+        } satisfies SocketSession;
+        await this.broadcastState(normalizedRoomId);
+
+        return {
+          ok: true,
+          roomId: normalizedRoomId,
+          role: 'spectator',
+          room: await this.roomsService.getPublicRoom(normalizedRoomId),
+        };
+      }
+
       const joinedRoom = this.gameEngine.joinRoom(
         room,
         payload.playerName,
@@ -146,6 +193,12 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       } catch (joinError) {
         this.logger.warn(`Failed to join socket to room: ${joinError}`);
       }
+      client.data = {
+        roomId: normalizedRoomId,
+        role: 'player',
+        playerId:
+          joinedRoom.players.find((player) => player.socketId === client.id)?.id ?? null,
+      } satisfies SocketSession;
       this.broadcastState(normalizedRoomId);
 
       return {
@@ -155,6 +208,27 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
           ?.id,
         room: this.gameEngine.toPublicState(joinedRoom),
       };
+    });
+  }
+
+  @SubscribeMessage(GAME_EVENTS.LEAVE_ROOM)
+  handleLeaveRoom(
+    @MessageBody() payload: LeaveRoomDto,
+    @ConnectedSocket() client: Socket,
+  ) {
+    return this.tryAction(client, async () => {
+      const roomId = this.requireRoomId(payload.roomId);
+      const session = client.data as SocketSession;
+      await client.leave(roomId);
+
+      if (session.role === 'spectator') {
+        await this.roomsService.removeSpectator(roomId, client.id);
+        client.data = {} satisfies SocketSession;
+        await this.broadcastState(roomId);
+        return { ok: true };
+      }
+
+      return { ok: true };
     });
   }
 
@@ -189,9 +263,14 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       const player = updatedRoom.players.find(p => p.socketId === client.id);
       const resolvedPlayerId = player?.id ?? payload.playerId ?? null;
+      client.data = {
+        roomId: normalizedRoomId,
+        role: 'player',
+        playerId: resolvedPlayerId,
+      } satisfies SocketSession;
 
       await client.join(normalizedRoomId);
-      this.server.to(normalizedRoomId).emit(GAME_EVENTS.PLAYER_RECONNECTED, {
+      await this.publishRoomEvent(normalizedRoomId, GAME_EVENTS.PLAYER_RECONNECTED, {
         roomId: normalizedRoomId,
         playerId: resolvedPlayerId,
       });
@@ -295,20 +374,20 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
 
       if (resolution.room.lastRoundResult) {
-        this.server
-          .to(roomId)
-          .emit(GAME_EVENTS.ROUND_RESULT, resolution.room.lastRoundResult);
+        await this.publishRoomEvent(
+          roomId,
+          GAME_EVENTS.ROUND_RESULT,
+          resolution.room.lastRoundResult,
+        );
       }
 
       for (const event of resolution.events) {
         if (event.type === 'switchInnings') {
-          this.server
-            .to(roomId)
-            .emit(GAME_EVENTS.SWITCH_INNINGS, event.payload);
+          await this.publishRoomEvent(roomId, GAME_EVENTS.SWITCH_INNINGS, event.payload);
         }
 
         if (event.type === 'gameOver') {
-          this.server.to(roomId).emit(GAME_EVENTS.GAME_OVER, event.payload);
+          await this.publishRoomEvent(roomId, GAME_EVENTS.GAME_OVER, event.payload);
         }
       }
 
@@ -398,14 +477,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private async broadcastState(roomId: string) {
     const room = await this.roomsService.getRoom(roomId);
     const validRoom = this.gameEngine.ensureValidState(room);
-    // Update the room in memory with validated state
     await this.roomsService.save(validRoom);
-    this.server
-      .to(roomId)
-      .emit(
-        GAME_EVENTS.GAME_STATE_UPDATE,
-        this.gameEngine.toPublicState(validRoom),
-      );
+    await this.roomBroadcastService.publishState(
+      await this.roomsService.getPublicRoom(roomId),
+    );
   }
 
 
@@ -427,6 +502,10 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.emit(GAME_EVENTS.ERROR, { message });
       return { ok: false, message } as T;
     }
+  }
+
+  private async publishRoomEvent(roomId: string, event: string, payload: unknown) {
+    await this.roomBroadcastService.publish(roomId, event, payload);
   }
 
   private async validateGameAction(

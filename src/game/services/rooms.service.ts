@@ -93,7 +93,20 @@ export class RoomsService {
   }
 
   async getPublicRoom(roomId: string): Promise<PublicRoomState> {
-    return this.gameEngine.toPublicState(await this.getRoom(roomId));
+    const room = await this.getRoom(roomId);
+    const publicRoom = this.gameEngine.toPublicState(room);
+    return {
+      ...publicRoom,
+      spectatorCount: await this.roomCache.getSpectatorCount(room.id),
+    };
+  }
+
+  async addSpectator(roomId: string, socketId: string) {
+    await this.roomCache.addSpectator(roomId, socketId);
+  }
+
+  async removeSpectator(roomId: string, socketId: string) {
+    await this.roomCache.removeSpectator(roomId, socketId);
   }
 
   async save(

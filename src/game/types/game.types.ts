@@ -1,5 +1,6 @@
 export type GameMode = 'solo' | 'duel' | 'team';
 export type TeamId = 'A' | 'B';
+export type ClientRole = 'player' | 'spectator';
 export type GameStatus =
   | 'waiting'
   | 'ready'
@@ -111,4 +112,5 @@ export interface RoomState {
 
 export interface PublicRoomState extends RoomState {
   awaitingPlayerIds: string[];
+  spectatorCount: number;
 }

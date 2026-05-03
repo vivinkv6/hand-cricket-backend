@@ -35,6 +35,9 @@ export class GameActionGuard {
     } = options;
 
     const player = room.players.find((entry) => entry.id === playerId);
+    if (client.data?.role === 'spectator') {
+      throw new Error('Spectators cannot perform match actions.');
+    }
 
     if (!player) {
       throw new Error('Player not found in this room.');

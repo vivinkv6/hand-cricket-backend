@@ -61,6 +61,18 @@ export class RoomCacheService {
     );
   }
 
+  async addSpectator(roomId: string, socketId: string): Promise<void> {
+    await this.redis.addToSet(this.spectatorSetKey(roomId), socketId);
+  }
+
+  async removeSpectator(roomId: string, socketId: string): Promise<void> {
+    await this.redis.removeFromSet(this.spectatorSetKey(roomId), socketId);
+  }
+
+  async getSpectatorCount(roomId: string): Promise<number> {
+    return this.redis.countSetMembers(this.spectatorSetKey(roomId));
+  }
+
   private roomStateKey(roomId: string) {
     return `room:${roomId}:state`;
   }
@@ -71,6 +83,10 @@ export class RoomCacheService {
 
   private cooldownKey(roomId: string, playerId: string, eventName: string) {
     return `room:${roomId}:player:${playerId}:cooldown:${eventName}`;
+  }
+
+  private spectatorSetKey(roomId: string) {
+    return `room:${roomId}:spectators`;
   }
 
   private resolveRoomTtl(room: RoomState) {

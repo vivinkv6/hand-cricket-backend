@@ -1,5 +1,5 @@
 import { IsString, IsOptional, IsEnum, IsUUID, IsNumber, Min, Max, Length, IsIn } from 'class-validator';
-import type { GameMode, TeamId, TossChoice } from '../types/game.types';
+import type { ClientRole, GameMode, TeamId, TossChoice } from '../types/game.types';
 
 export class CreateRoomDto {
   @IsEnum(['solo', 'duel', 'team'])
@@ -21,6 +21,7 @@ export class JoinRoomDto {
   @Length(4, 8)
   roomId!: string;
 
+  @IsOptional()
   @IsString()
   @Length(1, 24)
   playerName!: string;
@@ -28,6 +29,10 @@ export class JoinRoomDto {
   @IsOptional()
   @IsUUID()
   playerId?: string;
+
+  @IsOptional()
+  @IsIn(['player', 'spectator'])
+  role?: ClientRole;
 }
 
 export class RejoinRoomDto {
@@ -43,6 +48,12 @@ export class RejoinRoomDto {
   @IsString()
   @Length(1, 24)
   playerName?: string;
+}
+
+export class LeaveRoomDto {
+  @IsString()
+  @Length(4, 8)
+  roomId!: string;
 }
 
 export class RoomPlayerActionDto {

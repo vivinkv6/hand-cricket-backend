@@ -2,6 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { RoomState, MatchResult, TossState, TeamState, PlayerState, InningsState } from '../types/game.types';
 
+interface ReplayQueryOptions {
+  cursor?: number;
+  limit?: number;
+}
+
 @Injectable()
 export class MatchesService {
   private readonly logger = new Logger(MatchesService.name);
@@ -291,6 +296,146 @@ export class MatchesService {
       include: { player: true },
       orderBy: { runs: 'desc' }
     });
+  }
+
+  async getMatchReplay(matchId: string, options?: ReplayQueryOptions) {
+    const safeCursor = Math.max(0, options?.cursor ?? 0);
+    const safeLimit = Math.min(96, Math.max(12, options?.limit ?? 24));
+
+    const [room, totalEvents, ballHistory] = await Promise.all([
+      this.prisma.gameRoom.findUnique({
+        where: { id: matchId },
+        select: {
+          id: true,
+          mode: true,
+          status: true,
+          snapshot: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      }),
+      this.prisma.ballHistoryEntry.count({
+        where: { roomId: matchId },
+      }),
+      this.prisma.ballHistoryEntry.findMany({
+        where: { roomId: matchId },
+        orderBy: [{ inningsNumber: 'asc' }, { ballNumber: 'asc' }],
+        skip: safeCursor,
+        take: safeLimit,
+      }),
+    ]);
+
+    if (!room) {
+      return null;
+    }
+
+    const snapshot = room.snapshot as unknown as RoomState;
+    const playerMap = new Map(snapshot.players.map((player) => [player.id, player]));
+    const teamMap = new Map(snapshot.teams.map((team) => [team.id, team]));
+
+    let aggregateRuns = 0;
+    let wicketsFallen = 0;
+
+    return {
+      matchId: room.id,
+      segment: {
+        cursor: safeCursor,
+        limit: safeLimit,
+        nextCursor:
+          safeCursor + ballHistory.length < totalEvents
+            ? safeCursor + ballHistory.length
+            : null,
+        hasMore: safeCursor + ballHistory.length < totalEvents,
+        totalEvents,
+      },
+      metadata: {
+        mode: room.mode,
+        status: room.status,
+        createdAt: room.createdAt,
+        updatedAt: room.updatedAt,
+        targetScore: snapshot.targetScore,
+        result: snapshot.result,
+        players: snapshot.players.map((player) => ({
+          id: player.id,
+          name: player.name,
+          teamId: player.teamId,
+          isBot: player.isBot,
+        })),
+        teams: snapshot.teams.map((team) => ({
+          id: team.id,
+          name: team.name,
+          captainId: team.captainId,
+        })),
+      },
+      events: ballHistory.map((ball) => {
+        const batterTeamId = ball.batterId
+          ? playerMap.get(ball.batterId)?.teamId ?? null
+          : null;
+        const bowlerTeamId = ball.bowlerId
+          ? playerMap.get(ball.bowlerId)?.teamId ?? null
+          : null;
+
+        aggregateRuns += ball.runsScored;
+        if (ball.result === 'wicket') {
+          wicketsFallen += 1;
+        }
+
+        return {
+          inningsNumber: ball.inningsNumber,
+          ballNumber: ball.ballNumber,
+          over: ball.overNumber,
+          ballInOver: ball.ballInOver,
+          batsmanId: ball.batterId,
+          batsmanName: ball.batterId ? playerMap.get(ball.batterId)?.name ?? null : null,
+          batsmanChoice: ball.batterChoice,
+          bowlerId: ball.bowlerId,
+          bowlerName: ball.bowlerId ? playerMap.get(ball.bowlerId)?.name ?? null : null,
+          bowlerChoice: ball.bowlerChoice,
+          battingTeamId: batterTeamId,
+          bowlingTeamId: bowlerTeamId,
+          battingTeamName: batterTeamId ? teamMap.get(batterTeamId)?.name ?? null : null,
+          bowlingTeamName: bowlerTeamId ? teamMap.get(bowlerTeamId)?.name ?? null : null,
+          result: ball.result,
+          runs: ball.runsScored,
+          timestamp: ball.createdAt,
+          highlightTags: this.buildHighlightTags({
+            result: ball.result,
+            runs: ball.runsScored,
+            aggregateRuns,
+            wicketsFallen,
+          }),
+        };
+      }),
+    };
+  }
+
+  private buildHighlightTags(args: {
+    result: string;
+    runs: number;
+    aggregateRuns: number;
+    wicketsFallen: number;
+  }) {
+    const tags: string[] = [];
+
+    if (args.result === 'wicket') {
+      tags.push('wicket');
+    }
+
+    if (args.runs === 6) {
+      tags.push('six');
+    } else if (args.runs === 4) {
+      tags.push('four');
+    }
+
+    if (args.aggregateRuns > 0 && args.aggregateRuns % 25 === 0) {
+      tags.push('milestone');
+    }
+
+    if (args.wicketsFallen > 0 && args.wicketsFallen % 3 === 0) {
+      tags.push('collapse');
+    }
+
+    return tags;
   }
 
   async getCurrentInningsNumber(matchId: string): Promise<number> {
