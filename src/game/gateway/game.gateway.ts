@@ -299,7 +299,6 @@ export class GameGateway
       });
       await this.roomsService.save(
         this.gameEngine.startGame(room, payload.playerId),
-        true,
       );
 
       this.broadcastState(roomId);
@@ -322,7 +321,6 @@ export class GameGateway
       });
       await this.roomsService.save(
         this.gameEngine.selectBowler(room, payload.playerId, payload.bowlerId),
-        true, // persist immediately
       );
 
       this.broadcastState(roomId);
@@ -344,7 +342,7 @@ export class GameGateway
         requireLiveMatch: true,
       });
       const updatedRoom = this.gameEngine.selectToss(room, payload.playerId, payload.choice);
-      await this.roomsService.save(updatedRoom, true);
+      await this.roomsService.save(updatedRoom);
 
       this.broadcastState(roomId);
       return { ok: true };
@@ -368,7 +366,7 @@ export class GameGateway
         payload.playerId,
         payload.number,
       );
-      await this.roomsService.save(resolution.room, true, {
+      await this.roomsService.save(resolution.room, false, {
         appendLastRound: Boolean(resolution.room.lastRoundResult),
       });
 
@@ -475,9 +473,6 @@ export class GameGateway
   }
 
   private async broadcastState(roomId: string) {
-    const room = await this.roomsService.getRoom(roomId);
-    const validRoom = this.gameEngine.ensureValidState(room);
-    await this.roomsService.save(validRoom);
     await this.roomBroadcastService.publishState(
       await this.roomsService.getPublicRoom(roomId),
     );

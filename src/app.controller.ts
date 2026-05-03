@@ -11,6 +11,7 @@ export class AppController {
       service: 'hand-cricket-server',
       status: 'ok',
       activeRooms: this.roomsService.getRoomCount(),
+      persistence: this.roomsService.getPersistenceMetrics(),
       timestamp: new Date().toISOString(),
     };
   }
